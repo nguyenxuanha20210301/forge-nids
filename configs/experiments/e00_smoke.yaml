@@ -1,0 +1,13 @@
+# synthetic end to end check of the run loop, no dataset needed
+inherit: [../base.yaml]
+
+experiment:
+  name: e00_smoke
+  module: smoke
+
+smoke:
+  prevalences: [0.002, 0.01, 0.05, 0.15]
+  n_per_window: 200000
+  grid_size: 201
+  epsilon: 0.001
+  delta: 0.05

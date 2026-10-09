@@ -1,0 +1,6 @@
+# LITNET-2020, academic network traffic, about ten months from 2019 to 2020
+dataset:
+  name: litnet2020
+  raw_dir: litnet2020
+  processed_version: v1
+  window_freq: W

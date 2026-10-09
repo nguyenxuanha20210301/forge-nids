@@ -1,0 +1,6 @@
+# Kyoto 2006 plus through the AnoShift benchmark, about ten years
+dataset:
+  name: anoshift
+  raw_dir: anoshift
+  processed_version: v1
+  window_freq: Y

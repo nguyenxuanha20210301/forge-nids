@@ -1,0 +1,21 @@
+# local mirror of the Drive project folder, data and runs live on Drive
+/drive/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# environments
+.venv/
+venv/
+.env
+
+# editors and systems
+.vscode/
+.idea/
+.DS_Store

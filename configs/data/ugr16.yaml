@@ -1,0 +1,6 @@
+# UGR16, ISP netflow with a calibration period and a test period
+dataset:
+  name: ugr16
+  raw_dir: ugr16
+  processed_version: v1
+  window_freq: W
