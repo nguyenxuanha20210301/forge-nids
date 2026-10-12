@@ -5,8 +5,9 @@ colors are assigned to methods by a fixed order, never by rank, so a method keep
 
 import matplotlib as mpl
 
-# colorblind checked categorical order, light background
-COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
+# colorblind checked categorical order, light background, adjacent slots stay apart for the common color vision
+# deficiencies. eight slots at most, a ninth method needs another channel than color
+COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 GRAY = "#7a7a75"
 # second channel for lines that would otherwise differ by color alone
 DASHES = ["-", "--", "-.", ":", (0, (5, 1, 1, 1)), (0, (1, 1))]
@@ -15,7 +16,8 @@ DASHES = ["-", "--", "-.", ":", (0, (5, 1, 1, 1)), (0, (1, 1))]
 SEQUENTIAL = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
 
 # every method of the project in one fixed order, which gives each method the same color in every experiment
-METHOD_ORDER = ("forge_simplex", "forge_pooled", "ltt_iid", "forge_strict", "forge_online", "forge_previous")
+METHOD_ORDER = ("forge_simplex", "forge_pooled", "ltt_iid", "forge_strict", "forge_online", "forge_previous",
+                "conformal_fnr", "fixed_sel")
 
 # single column and double column widths in inches, close to most Elsevier and IEEE templates
 WIDTH_SINGLE = 3.5
@@ -53,7 +55,8 @@ def use() -> None:
 
 
 def color_for(name: str) -> str:
-    return COLORS[METHOD_ORDER.index(name) % len(COLORS)]
+    # no wrapping around, two methods never share a color
+    return COLORS[METHOD_ORDER.index(name)]
 
 
 def percent(v, _pos=None) -> str:

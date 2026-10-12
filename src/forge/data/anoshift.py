@@ -401,9 +401,11 @@ def read_manifest(cfg: dict) -> dict:
     return json.loads((processed_dir(cfg) / "manifest.json").read_text(encoding="utf-8"))
 
 
-def load(cfg: dict, columns: list[str] | None = None) -> pd.DataFrame:
-    # the processed table in the order it was written, by year and then by row position in the year
-    flows = pq.read_table(processed_dir(cfg) / "flows.parquet", columns=columns).to_pandas()
+def load(cfg: dict, columns: list[str] | None = None, years: list[int] | None = None) -> pd.DataFrame:
+    # the processed table in the order it was written, by year and then by row position in the year, only the given
+    # years when years is set
+    filters = None if years is None else [("year", "in", [int(y) for y in years])]
+    flows = pq.read_table(processed_dir(cfg) / "flows.parquet", columns=columns, filters=filters).to_pandas()
     if "attack_type" in flows.columns:
         flows["attack_type"] = flows["attack_type"].cat.set_categories(ATTACK_TYPES)
     return flows

@@ -1,4 +1,4 @@
-"""FORGE-Certify, the dismiss threshold of C1, its online variant, and the i.i.d. Learn then Test baseline.
+"""FORGE-Certify, the dismiss threshold of C1, its online variant, and the baselines of RQ1.
 
 a flow is dismissed when its score is at or below the threshold. at prevalence pi the false omission rate is
 pi m / (pi m + (1 - pi) b), with m the share of attacks dismissed and b the share of benign flows dismissed. it rises
@@ -34,6 +34,10 @@ bound on D comes from the window's own unlabeled scores through the one sided DK
 the place of the benign scores above, they fix the start, and the attack scores of D_cal are independent of them, so
 the same argument holds with probability at least 1 - delta_m - delta_window. only the attack families must keep their
 score distributions between D_cal and the window.
+
+the baselines of RQ1 besides Learn then Test claim less. the conformal threshold of Şahin and Mert bounds the miss rate
+on average over the calibration draw, and the threshold of common practice reads the rate off a labeled set without
+any bound.
 """
 
 import numpy as np
@@ -184,6 +188,65 @@ def ltt_iid(benign_below, attack_below, eps, delta):
     first = first_index(np.asarray(clopper_pearson_upper(0, dismissed, delta)) <= eps)
     index = fixed_sequence(upper <= eps, first)
     return {"index": index, "bound": _take(upper, index, np.nan)}
+
+
+def conformal_fnr(attack_below, n_attack, beta):
+    """the dismiss side of the dual threshold conformal deferral of Şahin and Mert, the baseline of RQ1 with an FNR
+    guarantee.
+
+    the threshold is the loosest one with at most floor(beta (n + 1)) - 1 of the n calibration attacks at or below it. a
+    new attack exchangeable with them then falls at or below it with probability at most beta, on average over the
+    calibration draw. that bounds the miss rate in expectation and says nothing about the FOR. attack_below holds all
+    attacks in one row, shape (..., G). returns the index of the threshold, -1 when none qualifies.
+    """
+    allowed = np.floor(beta * (np.asarray(n_attack) + 1)) - 1
+    return fixed_sequence(np.asarray(attack_below) <= np.asarray(allowed)[..., None], 0)
+
+
+def plug_in(benign_below, n_benign, attack_below, n_attack, eps, pi):
+    """the threshold of common practice, the loosest one whose FOR at prevalence pi, estimated on one labeled set, stays
+    at or below eps, searched from the strictest threshold to the first failure. there is no bound behind it.
+
+    attack_below holds all attacks in one row. returns the index of the threshold, -1 when the strictest one fails.
+    """
+    b = np.asarray(benign_below) / np.asarray(n_benign)[..., None]
+    m = np.asarray(attack_below) / np.asarray(n_attack)[..., None]
+    return fixed_sequence(for_from_rates(pi, m, b) <= eps, 0)
+
+
+def min_family_size(eps, pi_max, delta_miss, benign_share) -> int:
+    # fewest attacks a family needs for a threshold whose benign lower bound is benign_share to pass with no miss of the
+    # family, Proposition 3. with fewer, the bound with no miss, 1 - delta_miss^(1/n), already exceeds the miss rate
+    # that the threshold allows
+    kappa = eps * (1 - pi_max) / ((1 - eps) * pi_max)
+    return int(np.ceil(np.log(1 / delta_miss) / -np.log1p(-kappa * benign_share)))
+
+
+def family_groups(sizes, minimum) -> np.ndarray:
+    """the group of each attack family in the certificate, by a rule that looks at the family sizes only, so it is
+    fixed before any calibration score is seen.
+
+    a family with at least minimum attacks forms its own group. the others are pooled into one group, which joins the
+    largest family when the pool still has fewer than minimum attacks. groups are numbered from 0.
+    """
+    sizes = np.asarray(sizes, dtype=float)
+    rare = sizes < minimum
+    group = np.arange(len(sizes))
+    if rare.any():
+        group[rare] = np.flatnonzero(rare)[0]
+        if sizes[rare].sum() < minimum and not rare.all():
+            group[rare] = np.flatnonzero(~rare)[np.argmax(sizes[~rare])]
+    return np.unique(group, return_inverse=True)[1]
+
+
+def group_rows(below, n, groups):
+    # counts at or below each threshold and family sizes summed within each group, along the family axis
+    below = np.asarray(below)
+    n = np.asarray(n)
+    groups = np.asarray(groups)
+    k = range(groups.max() + 1)
+    return (np.stack([below[..., groups == g, :].sum(-2) for g in k], axis=-2),
+            np.stack([n[..., groups == g].sum(-1) for g in k], axis=-1))
 
 
 def counts_below(scores, grid):
