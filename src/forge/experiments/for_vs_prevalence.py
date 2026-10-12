@@ -11,10 +11,10 @@ with replacement from the calibration year, so the share of draws in which a met
 over the calibration draw that its guarantee speaks of, with the calibration year as the population. a deployment
 window is one block of a deployment year, the year split into blocks of equal session count. it keeps all its benign
 sessions and has its attacks thinned to each target prevalence, and the true rate of a threshold in it follows from
-the score distributions of each class and attack type in the whole block. the blocks of the deployment years hold
-63% to 99.4% attacks, far outside any claim, so only thinned windows are evaluated. each draw also takes one window of
-the thinned size from the block, with replacement, on which the online certificate runs and the realized share of
-attacks among the dismissed sessions is counted.
+the score distributions of each class and attack type in the whole block. the blocks of AnoShift's deployment years
+hold 15% to 99.4% attacks, above pi_max in every block, so only thinned windows are evaluated. each draw also takes one
+window of the thinned size from the block, with replacement, on which the online certificate runs and the realized
+share of attacks among the dismissed sessions is counted.
 
 what each method claims.
     forge_simplex   Theorem 1, every prevalence up to pi_max and every mix of the attack families, valid while both
@@ -29,15 +29,18 @@ what each method claims.
 
 the attack types are the families. a type whose expected number of calibration attacks could not certify, with no miss
 at all, a threshold dismissing family_floor of the benign sessions is merged with the others, a rule that sees the
-family sizes only. once merged, the FORGE claim covers the calibration mix of attack types only, and the unknown type
-makes up 0.8% of the attacks of 2010, 1.8% of those of 2011 and 0.002% of those of 2015. the attacks of a window
-therefore come in more than one mix, the block's own, which an operator would meet, and the known type alone, which
-keeps the change of mix out of the comparison and differs from the calibration mix by the 0.8% of unknown attacks.
-the calibration mix itself would weight the few unknown sessions of a late block up to 0.8% of the attacks, so their
+family sizes only. once merged, the FORGE claim covers the calibration mix of attack types only. the attacks of a
+window come in more than one mix, the block's own, which an operator would meet, and one type alone, which keeps a
+change of mix out of the comparison when types are merged and is a corner of the covered mixes when they are not. the
+calibration mix itself would weight the few unknown sessions of a late block up to their calibration share, so their
 sampling noise would decide the rate. a block that holds fewer attacks of a type than its thinned window would take
-on average has no window at that prevalence and mix. the deployment years also drift away from the calibration year in
-the scores of both classes, so a FORGE failure with the known type alone can still come from drift, which the miss and
-benign dismiss rates saved per window show.
+on average has no window at that prevalence and mix.
+
+the offline claim holds while both classes keep their calibration score distributions, the online claim while the
+attack types do. AnoShift drifts far from its IID years in the NEAR and FAR years, in the scores of both classes, so
+RQ1 is read on the windows of the main period, the IID year after calibration, and the later periods show what the
+drift does to every method. the AUC of each window, its benign share dismissed and its miss rate per attack type at the
+offline FORGE thresholds, set against the same in the calibration year, show which assumption breaks where.
 """
 
 import matplotlib.pyplot as plt
@@ -46,8 +49,8 @@ import pandas as pd
 from matplotlib.ticker import NullFormatter
 
 from forge import runs
-from forge.certify.certificate import (certify, certify_online, conformal_fnr, counts_below, family_groups,
-                                       for_from_rates, group_rows, ltt_iid, min_family_size, plug_in)
+from forge.certify.certificate import (certify, conformal_fnr, counts_below, family_groups, for_from_rates, group_rows,
+                                       ltt_iid, min_family_size, online_certifier, plug_in)
 from forge.data import anoshift, splits
 from forge.data.synthetic import draw_counts
 from forge.eval.metrics import auc, share_with_interval
@@ -75,6 +78,9 @@ FEATURES = [name for name, _, _, _, _ in anoshift.FEATURES]
 COLUMNS = ["year", "order", "label", "attack_type", *FEATURES]
 # quantiles of the FOR over the certified draw and window pairs in the figure over prevalences
 LOW, HIGH = 0.05, 0.95
+# a block's miss rate of an attack type enters the drift figure only from this many sessions of the type on, below it
+# a handful of sessions would decide the rate
+MIN_TYPE_SESSIONS = 1000
 
 
 def encoder() -> Encoder:
@@ -188,6 +194,14 @@ def evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below,
     return rows
 
 
+def _type_range(windows: pd.DataFrame, family: str) -> str:
+    # the miss rates of one attack type over the blocks that hold enough of its sessions to measure one
+    kept = windows.loc[windows[family] >= MIN_TYPE_SESSIONS, f"forge_miss_{family}"]
+    if kept.empty:
+        return f"{family} in no block with {MIN_TYPE_SESSIONS} sessions"
+    return f"{family} {kept.min():.4f} to {kept.max():.4f} over {len(kept)} blocks"
+
+
 def run(cfg: dict, run: runs.Run) -> None:
     d, sc, c, dep, sim = cfg["dataset"], cfg["scorer"], cfg["certify"], cfg["deployment"], cfg["simulation"]
     eps, delta, pi_max, part = c["epsilon"], c["delta"], c["pi_max"], c["delta_benign"]
@@ -202,6 +216,10 @@ def run(cfg: dict, run: runs.Run) -> None:
     if unknown:
         raise ValueError(f"unknown methods {', '.join(sorted(unknown))}")
     years = role_years(cfg["split"])
+    periods = list(dict.fromkeys(anoshift.period(y) for y in years["deployment"]))
+    if dep["main_period"] not in periods:
+        raise ValueError(f"main period {dep['main_period']} is not among the periods of the deployment years, "
+                         f"{', '.join(periods)}")
     manifest = anoshift.read_manifest(cfg)
     run.log(f"{d['name']} {d['processed_version']}, fingerprint {manifest['fingerprint']}, years "
             + ", ".join(f"{role} {years[role][0]} to {years[role][-1]}" for role in ROLES))
@@ -253,7 +271,8 @@ def run(cfg: dict, run: runs.Run) -> None:
                 counts = class_counts(s["score"][lo:hi], s["attack_type"][lo:hi], grid)
                 if counts["sizes"][0] == 0 or counts["sizes"][1:].sum() == 0:
                     raise ValueError(f"block {block} of {year} lacks benign sessions or attacks, it cannot be thinned")
-                windows.append({"year": year, "block": block, **counts})
+                windows.append({"year": year, "block": block, "auc": auc(s["score"][lo:hi], s["label"][lo:hi]),
+                                **counts})
     cal_auc = auc(np.concatenate(cal_scores), np.concatenate(cal_labels))
     del cal_scores, cal_labels
     # attack_type holds codes into attack_types
@@ -299,6 +318,23 @@ def run(cfg: dict, run: runs.Run) -> None:
         hit = out["index"] >= 0
         run.log(f"{method}, refused in {np.mean(~hit):.3f} of calibration sets, mean benign share dismissed in the "
                 f"calibration year {np.where(hit, b_cal[np.maximum(out['index'], 0)], 0.0).mean():.4f}")
+    # the bounds of the calibration sets serve every window
+    certify_window = online_certifier(grouped_below, grouped_n, eps, delta, pi_max, part, **start)
+
+    # rates at the offline FORGE thresholds, averaged over the calibration draws that certify one
+    forge_index = offline["forge_simplex"]["index"]
+    forge_thresholds = forge_index[forge_index >= 0]
+
+    def at_forge(rate: np.ndarray) -> np.ndarray:
+        if len(forge_thresholds) == 0:
+            return np.full(rate.shape[:-1], np.nan)
+        return rate[..., forge_thresholds].mean(-1)
+
+    forge_cal = {"benign_dismissed": float(at_forge(b_cal)),
+                 "miss": {f: float(v) for f, v in zip(FAMILIES, at_forge(m_cal_family))}}
+    run.log(f"calibration year at the offline FORGE thresholds, benign share dismissed "
+            f"{forge_cal['benign_dismissed']:.4f}, miss rate "
+            + ", ".join(f"{f} {v:.4f}" for f, v in forge_cal["miss"].items()))
 
     rows, values, skipped = [], {}, []
     shape = (len(windows), len(prevalences), len(mixes), draws)
@@ -322,8 +358,7 @@ def run(cfg: dict, run: runs.Run) -> None:
                 drawn = draw_counts(rng, n_w, pi, shares, b_w, m_w_family, draws)
                 attack_below = drawn.family_below.sum(1)
                 window_below = drawn.benign_below + attack_below
-                online = certify_online(window_below, np.full(draws, n_w), grouped_below, grouped_n, eps, delta,
-                                        pi_max, part, **start)
+                online = certify_window(window_below, np.full(draws, n_w))
                 online_index[i, j, k], online_floor[i, j, k] = online["index"], online["floor"]
                 m_w = shares @ m_w_family
                 rows += evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below, eps, values,
@@ -337,6 +372,26 @@ def run(cfg: dict, run: runs.Run) -> None:
                     f"their blocks lack the attacks of a type that the thinned window would take")
     claims = pd.DataFrame(rows)
     run.save_table(claims, "claims")
+
+    window_rows = []
+    for i, w in enumerate(windows):
+        b_w, m_w_family, _, _ = rates(w)
+        # a type absent from the block has no miss rate
+        miss = np.where(w["sizes"][1:] > 0, at_forge(m_w_family), np.nan)
+        window_rows.append({
+            "window": i, "year": w["year"], "block": w["block"], "period": anoshift.period(w["year"]),
+            "position": w["year"] + (w["block"] + 0.5) / d["blocks_per_year"], "sessions": int(w["sizes"].sum()),
+            "benign": int(w["sizes"][0]), **{f: int(n) for f, n in zip(FAMILIES, w["sizes"][1:])},
+            "attack_share": float(w["sizes"][1:].sum() / w["sizes"].sum()), "auc": float(w["auc"]),
+            "forge_benign_dismissed": float(at_forge(b_w)),
+            **{f"forge_miss_{f}": float(v) for f, v in zip(FAMILIES, miss)},
+        })
+    window_table = pd.DataFrame(window_rows)
+    run.save_table(window_table, "windows")
+    for period, g in window_table.groupby("period", sort=False):
+        run.log(f"{period} windows {len(g)}, AUC {g['auc'].min():.4f} to {g['auc'].max():.4f}, at the offline FORGE "
+                f"thresholds benign share dismissed {g['forge_benign_dismissed'].min():.4f} to "
+                f"{g['forge_benign_dismissed'].max():.4f}, miss rate " + ", ".join(_type_range(g, f) for f in FAMILIES))
 
     # pooled over the windows of each period and of all deployment years, the FOR quantiles over the certified draw
     # and window pairs, the violation share over all pairs with its range over the windows
@@ -358,18 +413,39 @@ def run(cfg: dict, run: runs.Run) -> None:
             })
     by_prevalence = pd.DataFrame(summary_rows)
     run.save_table(by_prevalence, "by_prevalence")
-    for r in by_prevalence[by_prevalence["period"] == "all"].itertuples():
-        run.log(f"{r.method}, {r.mix} mix, prevalence {r.prevalence}, FOR above epsilon in {r.violation_rate:.4f} of "
-                f"draw and window pairs, from {r.violation_window_min:.4f} to {r.violation_window_max:.4f} by window, "
-                f"median FOR of certified pairs {r.for_median:.2e}, mean share of window sessions dismissed "
-                f"{r.dismissed_mean:.4f}, refused {r.refused:.3f}")
 
-    run.save_table(pd.DataFrame([{
-        "window": i, "year": w["year"], "block": w["block"], "period": anoshift.period(w["year"]),
-        "position": w["year"] + (w["block"] + 0.5) / d["blocks_per_year"], "sessions": int(w["sizes"].sum()),
-        "benign": int(w["sizes"][0]), **{f: int(n) for f, n in zip(FAMILIES, w["sizes"][1:])},
-        "attack_share": float(w["sizes"][1:].sum() / w["sizes"].sum()),
-    } for i, w in enumerate(windows)]), "windows")
+    # the claim of each FORGE method covers prevalences up to pi_max, at the calibration mix once rare types are merged,
+    # and the largest window violation share there, within each period, is the number to set against delta
+    covered = claims[claims["prevalence"] <= pi_max]
+    largest = {}
+    for (method, period, mix), g in covered.groupby(["method", "period", "mix"], sort=False):
+        top = g.loc[g["rate"].idxmax()]
+        largest.setdefault(method, {}).setdefault(period, {})[mix] = {
+            "year": int(top["year"]), "block": int(top["block"]), "prevalence": float(top["prevalence"]),
+            "rate": float(top["rate"]), "low": float(top["low"]), "high": float(top["high"])}
+    main = dep["main_prevalence"]
+    for period in periods:
+        for mix in mixes:
+            for method in methods:
+                g = by_prevalence[(by_prevalence["method"] == method) & (by_prevalence["period"] == period)
+                                  & (by_prevalence["mix"] == mix)].sort_values("prevalence")
+                if g.empty:
+                    continue
+                top = largest.get(method, {}).get(period, {}).get(mix)
+                if top is None:
+                    worst = "no window up to pi_max"
+                elif top["rate"] == 0:
+                    worst = "none in any window up to pi_max"
+                else:
+                    worst = (f"at most {top['rate']:.4f} in one window up to pi_max, {top['year']} block "
+                             f"{top['block']} at prevalence {top['prevalence']}")
+                dismissed = g.loc[g["prevalence"] == main, "dismissed_mean"]
+                run.log(f"{method}, {period} windows, {mix} mix, FOR above epsilon in "
+                        + ", ".join(f"{r:.4f} at {pi}" for pi, r in zip(g["prevalence"], g["violation_rate"]))
+                        + f" of draw and window pairs, {worst}, refused {g['refused'].mean():.3f}, mean share of "
+                        f"window sessions dismissed {dismissed.iloc[0] if len(dismissed) else np.nan:.4f} at "
+                        f"prevalence {main}")
+
     grid_table = pd.DataFrame({"index": np.arange(len(grid)), "threshold": grid, "selection_benign": b_sel,
                                "selection_attack": m_sel, "calibration_benign": b_cal, "calibration_attack": m_cal})
     for f, m in zip(FAMILIES, m_cal_family):
@@ -395,19 +471,6 @@ def run(cfg: dict, run: runs.Run) -> None:
                    "selection_loss": sel_loss,
                    "train_sessions": n_train, "train_attacks": train_attacks, "selection_auc": sel_auc,
                    "calibration_auc": cal_auc}, "scorer")
-
-    # the claim of each FORGE method covers prevalences up to pi_max at the calibration mix once rare types are merged,
-    # the largest window violation share there is the number to set against delta
-    covered = claims[claims["prevalence"] <= pi_max]
-    largest = {}
-    for (method, mix), g in covered.groupby(["method", "mix"], sort=False):
-        top = g.loc[g["rate"].idxmax()]
-        largest.setdefault(method, {})[mix] = {
-            "year": int(top["year"]), "block": int(top["block"]), "prevalence": float(top["prevalence"]),
-            "rate": float(top["rate"]), "low": float(top["low"]), "high": float(top["high"])}
-        run.log(f"{method}, {mix} mix, largest share of draws with FOR above epsilon at prevalences up to pi_max "
-                f"{top['rate']:.4f}, window {int(top['year'])} block {int(top['block'])}, prevalence "
-                f"{top['prevalence']}, 95% interval {top['low']:.4f} to {top['high']:.4f}")
     run.save_json({
         "dataset": d["name"], "processed_version": d["processed_version"], "fingerprint": manifest["fingerprint"],
         "years": years, "periods": {p: list(s) for p, s in anoshift.PERIODS.items()},
@@ -416,10 +479,12 @@ def run(cfg: dict, run: runs.Run) -> None:
         "family_floor": c["family_floor"], "family_minimum": minimum, "families": families,
         "calibration_prevalence": pi_cal, "calibration_sessions": n_cal,
         "calibration_expected_attacks": dict(zip(FAMILIES, expected.tolist())),
-        "fixed_index": fixed, "beta": beta, "prevalences": prevalences, "main_prevalence": dep["main_prevalence"],
-        "mixes": mixes, "skipped": skipped, "methods": methods, "draws": draws, "windows": len(windows),
+        "fixed_index": fixed, "beta": beta, "prevalences": prevalences, "main_prevalence": main,
+        "deployment_periods": periods, "main_period": dep["main_period"], "mixes": mixes, "skipped": skipped,
+        "methods": methods, "draws": draws, "windows": len(windows),
         "offline_refused": {m: float(np.mean(out["index"] < 0)) for m, out in offline.items()},
-        "selection_auc": sel_auc, "calibration_auc": cal_auc, "largest_violation_up_to_pi_max": largest,
+        "selection_auc": sel_auc, "calibration_auc": cal_auc, "forge_calibration": forge_cal,
+        "min_type_sessions": MIN_TYPE_SESSIONS, "largest_violation_up_to_pi_max": largest,
     }, "summary")
 
     for name, draw in FIGURES.items():
@@ -448,7 +513,8 @@ def fig_for_by_prevalence(run_dir) -> plt.Figure:
     summary = runs.load_json(run_dir, "summary")
     methods = [m for m in METHODS if m in summary["methods"]]
     mixes = summary["mixes"]
-    data = table[table["period"] == "all"]
+    # the windows of the main period, all deployment windows in runs from before the periods were set apart
+    data = table[table["period"] == summary.get("main_period", "all")]
     fig, axes = plt.subplots(len(mixes), 3, figsize=(style.WIDTH_DOUBLE, 0.5 + 2.2 * len(mixes)), sharex=True,
                              squeeze=False)
     # one row per mix of attack types. left, the FOR of the certified draw and window pairs, median and the 5% to 95%
@@ -510,24 +576,74 @@ def fig_violation_by_window(run_dir) -> plt.Figure:
         ax.axhline(summary["delta"], color=style.GRAY, linestyle="--", linewidth=1, label=r"$\delta$")
         ax.set_ylim(-0.02, 1.02)
         ax.set_ylabel(f"share with FOR > $\\varepsilon$\n{MIX_LABELS[mix]}")
-    deployment = summary["years"]["deployment"]
-    for ax, letter in zip(axes, "abcdef"):
-        for first, _ in summary["periods"].values():
-            if deployment[0] < first <= deployment[-1]:
-                ax.axvline(first, color=style.GRAY, linestyle=":", linewidth=1, label="AnoShift period boundary")
-        layout.panel_letter(ax, letter)
+    _time_axes(axes, summary)
     axes[-1].set_ylim(0, 1)
     axes[-1].yaxis.set_major_formatter(style.percent)
     axes[-1].set_ylabel(f"window sessions dismissed\n{MIX_LABELS[mixes[0]]}")
-    axes[-1].set_xlim(deployment[0], deployment[-1] + 1)
-    axes[-1].set_xticks(np.arange(deployment[0], deployment[-1] + 2))
     axes[-1].set_xlabel(f"deployment year, each split into {summary['blocks_per_year']} blocks of equal session "
                         f"count, attack prevalence {style.percent(summary['main_prevalence'])}")
     layout.legend_below(fig, axes[0], [LABELS[m] for m in methods])
     return fig
 
 
+def fig_drift_by_window(run_dir) -> plt.Figure:
+    style.use()
+    windows = runs.load_table(run_dir, "windows").sort_values("position")
+    summary = runs.load_json(run_dir, "summary")
+    cal = summary["forge_calibration"]
+    fig, axes = plt.subplots(3, 1, figsize=(style.WIDTH_DOUBLE, 0.8 + 1.7 * 3), sharex=True)
+    # top, the AUC of the scorer in each block. middle, the miss rate of each attack type at the offline FORGE
+    # thresholds over the same in the calibration year, from blocks with enough sessions of the type. bottom, the
+    # benign share dismissed at those thresholds over the same in the calibration year. a ratio of 1 is no drift, and
+    # the offline claim needs both ratios near 1, the online claim the middle one
+    x = windows["position"].to_numpy()
+    line = {"color": style.INK, "markersize": 2.5, "linewidth": 1}
+    axes[0].plot(x, windows["auc"], marker="o", **line)
+    calibration = axes[0].axhline(summary["calibration_auc"], color=style.GRAY, linestyle="--", linewidth=1)
+    axes[0].set_ylabel("AUC of the scorer")
+    ratios = {}
+    for family in FAMILIES:
+        kept = windows[family].to_numpy() >= MIN_TYPE_SESSIONS
+        ratios[family] = np.where(kept, windows[f"forge_miss_{family}"].to_numpy() / cal["miss"][family], np.nan)
+    ratios["benign"] = windows["forge_benign_dismissed"].to_numpy() / cal["benign_dismissed"]
+    # a block with no miss at the thresholds has a ratio of 0, which sits on the lower edge of the log axis
+    shown = np.concatenate(list(ratios.values()))
+    shown = shown[np.isfinite(shown) & (shown > 0)]
+    low = 10.0 ** np.floor(np.log10(min(shown.min(), 1.0))) if len(shown) else 0.1
+    high = 10.0 ** np.ceil(np.log10(max(shown.max(), 1.0))) if len(shown) else 10.0
+    # dashed and dotted gray lines already mark the calibration year and the period boundaries
+    for family, marker, dash in zip(FAMILIES, ["o", "s", "^", "D"], ["-", "-.", (0, (5, 1, 1, 1)), (0, (1, 1))]):
+        axes[1].plot(x, np.where(ratios[family] == 0, low, ratios[family]), marker=marker, linestyle=dash,
+                     label=f"{family} attack type", **line)
+    axes[2].plot(x, np.where(ratios["benign"] == 0, low, ratios["benign"]), marker="o", **line)
+    for ax in axes[1:]:
+        ax.axhline(1, color=style.GRAY, linestyle="--", linewidth=1)
+        ax.set_yscale("log")
+        ax.set_ylim(low, high)
+    axes[1].set_ylabel("attacks dismissed,\nwindow over calibration")
+    axes[2].set_ylabel("benign sessions dismissed,\nwindow over calibration")
+    _time_axes(axes, summary)
+    axes[-1].set_xlabel(f"deployment year, each split into {summary['blocks_per_year']} blocks of equal session "
+                        f"count")
+    layout.legend_below(fig, axes[1], [f"{f} attack type" for f in FAMILIES], [(calibration, "calibration year")])
+    return fig
+
+
+def _time_axes(axes, summary: dict) -> None:
+    # the boundaries between AnoShift periods inside the deployment years, the panel letters, and one tick at the
+    # start of every deployment year on the shared x axis
+    deployment = summary["years"]["deployment"]
+    for ax, letter in zip(axes, "abcdef"):
+        for first, _ in summary["periods"].values():
+            if deployment[0] < first <= deployment[-1]:
+                ax.axvline(first, color=style.GRAY, linestyle=":", linewidth=1, label="AnoShift period boundary")
+        layout.panel_letter(ax, letter)
+    axes[-1].set_xlim(deployment[0], deployment[-1] + 1)
+    axes[-1].set_xticks(np.arange(deployment[0], deployment[-1] + 2))
+
+
 FIGURES = {
     "for_by_prevalence": fig_for_by_prevalence,
     "violation_by_window": fig_violation_by_window,
+    "drift_by_window": fig_drift_by_window,
 }

@@ -3,8 +3,9 @@ import pytest
 from scipy.stats import beta, binom, binomtest
 
 from forge.certify.bounds import clopper_pearson_lower, clopper_pearson_upper, dkw_margin
-from forge.certify.certificate import (certify, certify_online, certify_online_scores, certify_scores, counts_below,
-                                       fixed_sequence, for_from_dismissed, for_from_rates, ltt_iid)
+from forge.certify.certificate import (certify, certify_online, certify_online_scores, certify_scores, conformal_fnr,
+                                       counts_below, family_groups, fixed_sequence, for_from_dismissed, for_from_rates,
+                                       group_rows, ltt_iid, min_family_size, online_certifier, plug_in)
 from forge.data.synthetic import benign_path, beta_cdfs, draw_counts, sample_flows
 
 BENIGN = (2, 8)
@@ -170,6 +171,27 @@ def test_certify_online_rejects_a_window_share_outside_delta(delta_window):
         certify_online(**window_counts(), eps=1e-3, delta=0.05, pi_max=0.1, delta_window=delta_window)
 
 
+def test_online_certifier_matches_certify_online_window_by_window():
+    # one D_cal of 300 draws against windows of other benign scores and sizes, its bounds computed once
+    grid = beta.ppf(np.arange(1, 201) / 201, *BENIGN)
+    b, m = beta_cdfs(grid, BENIGN, FAMILIES)
+    rng = np.random.default_rng(14)
+    cal = draw_counts(rng, 3000000, 0.02, SHARES, b, m, 300)
+    certifier = online_certifier(cal.family_below, cal.n_family, 1e-3, 0.05, 0.1, 0.02)
+    refused = []
+    for window_benign, n in [((2, 8), 100000), ((2, 5), 1000000), ((3, 4), 30000)]:
+        b_w, _ = beta_cdfs(grid, window_benign, FAMILIES)
+        win = draw_counts(rng, n, 0.05, SHARES, b_w, m, 300)
+        below, sizes = win.benign_below + win.family_below.sum(1), np.full(300, n)
+        once = certifier(below, sizes)
+        each = certify_online(below, sizes, cal.family_below, cal.n_family, 1e-3, 0.05, 0.1, 0.02)
+        for key in ("index", "bound", "floor"):
+            assert np.array_equal(once[key], each[key], equal_nan=True)
+        refused.append(np.mean(once["index"] < 0))
+    # the windows cover certified and refused draws alike
+    assert min(refused) < 0.5 < max(refused)
+
+
 def test_threshold_within_the_dkw_margin_never_passes():
     # with 1000 benign flows the margin is 0.043, so at the first threshold, which holds 1% of them, no benign share is
     # certain, and the bound must stay at 1 there whatever the attacks do
@@ -326,3 +348,64 @@ def test_online_violations_stay_below_delta_when_the_benign_scores_drift():
     assert shares["online"] <= 0.05
     # the same windows catch the offline certificate, whose benign bound no longer holds
     assert shares["offline"] > 0.5
+
+
+def test_conformal_fnr_allows_floor_beta_n_plus_one_minus_one_attacks():
+    # 99 attacks at beta 0.05 allow floor(5) - 1 = 4 at or below the threshold
+    below = np.array([0, 2, 4, 5, 9])
+    assert conformal_fnr(below, 99, 0.05) == 2
+    assert conformal_fnr(np.array([[0, 2, 4, 5, 9], [5, 6, 7, 8, 9]]), np.array([99, 99]), 0.05).tolist() == [2, -1]
+    # with beta (n + 1) below 1 no threshold qualifies, not even one with no attack below it
+    assert conformal_fnr(below, 10, 0.05) == -1
+
+
+def test_conformal_fnr_keeps_the_miss_rate_below_beta_on_average():
+    # the guarantee is marginal, over the calibration draw, so the mean true miss rate of the chosen thresholds sits at
+    # or below beta, close to it on a fine grid, while single draws exceed it often
+    grid = beta.ppf(np.linspace(0.001, 0.999, 2000), *FAMILIES[0])
+    m = beta.cdf(grid, *FAMILIES[0])
+    b, _ = beta_cdfs(grid, BENIGN, FAMILIES)
+    d = draw_counts(np.random.default_rng(12), 2000, 0.5, [1.0], b, m[None], 4000)
+    index = conformal_fnr(d.family_below[:, 0], d.n_family[:, 0], 0.02)
+    true = np.where(index >= 0, m[np.maximum(index, 0)], 0.0)
+    assert 0.017 < true.mean() <= 0.02 + 3 * true.std() / np.sqrt(len(true))
+    assert np.mean(true > 0.02) > 0.2
+
+
+def test_plug_in_stops_at_the_first_estimate_above_epsilon():
+    # at prevalence 0.1 the estimated FOR is 0, 0.0044, 0.0120 and 0.0081 at the four thresholds
+    benign, attack = np.array([100, 500, 550, 950]), np.array([0, 20, 60, 70])
+    assert plug_in(benign, 1000, attack, 1000, 0.01, 0.1) == 1
+    assert plug_in(benign, 1000, attack, 1000, 0.013, 0.1) == 3
+    # 0.0110 at the strictest threshold
+    assert plug_in(benign, 1000, np.array([10, 20, 60, 70]), 1000, 0.01, 0.1) == -1
+
+
+def test_min_family_size_is_where_a_threshold_with_no_miss_starts_to_pass():
+    # 1,364 attacks at epsilon 1e-3, pi_max 0.1 and delta_m 0.025 for a benign share of 0.3, as in proposal 6.3
+    eps, pi_max, delta_m = 1e-3, 0.1, 0.025
+    n = min_family_size(eps, pi_max, delta_m, 0.3)
+    assert n == 1364
+    for share in [0.05, 0.3, 0.9]:
+        n = min_family_size(eps, pi_max, delta_m, share)
+        assert for_from_rates(pi_max, clopper_pearson_upper(0, n, delta_m), share) <= eps
+        assert for_from_rates(pi_max, clopper_pearson_upper(0, n - 1, delta_m), share) > eps
+
+
+@pytest.mark.parametrize("sizes, groups", [
+    ([78000, 634], [0, 0]),
+    ([5000, 3000], [0, 1]),
+    ([5000, 600, 900], [0, 1, 1]),
+    ([5000, 10, 3000, 20], [0, 0, 1, 0]),
+    ([10, 20], [0, 0]),
+])
+def test_family_groups_pool_rare_families_and_join_the_largest_when_still_rare(sizes, groups):
+    assert family_groups(sizes, 1364).tolist() == groups
+
+
+def test_group_rows_sums_counts_and_sizes_within_groups():
+    below = np.arange(24).reshape(2, 3, 4)
+    n = np.array([[10, 20, 30], [40, 50, 60]])
+    summed, sizes = group_rows(below, n, np.array([0, 1, 0]))
+    assert summed.shape == (2, 2, 4) and sizes.tolist() == [[40, 20], [100, 50]]
+    assert (summed[:, 0] == below[:, 0] + below[:, 2]).all() and (summed[:, 1] == below[:, 1]).all()

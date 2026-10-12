@@ -7,12 +7,12 @@ experiment:
   module: for_vs_prevalence
 
 # first and last year of each role, training, selection and calibration in the IID period of AnoShift, deployment in
-# the NEAR and FAR periods
+# its last IID year, where the score distributions may still hold, and in the NEAR and FAR periods, where they drift
 split:
-  train: [2006, 2008]
-  selection: [2009, 2009]
-  calibration: [2010, 2010]
-  deployment: [2011, 2015]
+  train: [2006, 2007]
+  selection: [2008, 2008]
+  calibration: [2009, 2009]
+  deployment: [2010, 2015]
 
 scorer:
   # boosting rounds at most, training stops once the loss on the selection year has not improved for early_stopping
@@ -43,8 +43,9 @@ certify:
   # long as it dismisses at most start_slack more than the first threshold that would pass with no miss
   start_misses: 2
   start_slack: 0.05
-  # thresholds at the benign quantiles j / (grid_size + 1) of the selection year
-  grid_size: 200
+  # thresholds at the benign quantiles j / (grid_size + 1) of the selection year. steps of 0.1% of the benign sessions
+  # keep apart the baselines, whose thresholds lie within the top 1%
+  grid_size: 1000
   # an attack type is its own family only when its expected calibration attacks could certify, with no miss, a
   # threshold dismissing this share of the benign sessions, 1,364 attacks at the values above. the others are merged
   family_floor: 0.3
@@ -57,11 +58,14 @@ deployment:
   # each block of a deployment year keeps all its benign sessions and has its attacks thinned to each prevalence
   prevalences: [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
   # the mix of attack types among the attacks of a window, window for the block's own, calibration for the mix of the
-  # calibration set, or the name of one attack type. the FORGE claim covers the calibration mix once rare types are
-  # merged, the known type alone differs from it by the 0.8% of unknown attacks of the calibration year
+  # calibration set, or the name of one attack type. the FORGE claim covers every mix while each type is its own
+  # family, and the calibration mix once rare types are merged. the unknown type, 3.7% of the attacks of 2009, expects
+  # about 3,684 calibration attacks and stands alone
   mixes: [window, known]
   # the prevalence of the figure over windows
   main_prevalence: 0.1
+  # the period whose windows answer RQ1, the later periods show the drift
+  main_period: iid
 
 simulation:
   methods: [forge_simplex, forge_online, ltt_iid, conformal_fnr, fixed_sel]

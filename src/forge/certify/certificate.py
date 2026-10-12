@@ -164,15 +164,30 @@ def certify_online(window_below, n_window, attack_below, n_attack, eps, delta, p
     none is certified, its FOR bound and the automation floor, a lower bound on the share of the window's flows
     dismissed.
     """
+    return online_certifier(attack_below, n_attack, eps, delta, pi_max, delta_window, start, start_misses,
+                            start_slack)(window_below, n_window)
+
+
+def online_certifier(attack_below, n_attack, eps, delta, pi_max, delta_window=None, start="feasible", start_misses=2,
+                     start_slack=0.05):
+    """certify_online for many windows against the same D_cal.
+
+    the bounds on the family miss rates depend on D_cal alone and take most of the time on a fine grid, so they are
+    computed once here. the function returned takes window_below and n_window and returns what certify_online does.
+    """
     delta_window = delta / 2 if delta_window is None else delta_window
     m_upper, m_with = _miss_upper(attack_below, n_attack, _rest_of_delta(delta, delta_window, "delta_window"),
                                   start_misses)
-    d_lower = _share_lower(window_below, n_window, delta_window)
-    bound = for_from_dismissed(pi_max, m_upper, d_lower)
-    first = _start([for_from_dismissed(pi_max, m[..., None], d_lower) for m in m_with], d_lower, eps, start,
-                   start_slack)
-    index = fixed_sequence(bound <= eps, first)
-    return {"index": index, "bound": _take(bound, index, np.nan), "floor": _take(d_lower, index, 0.0)}
+
+    def certify_window(window_below, n_window):
+        d_lower = _share_lower(window_below, n_window, delta_window)
+        bound = for_from_dismissed(pi_max, m_upper, d_lower)
+        first = _start([for_from_dismissed(pi_max, m[..., None], d_lower) for m in m_with], d_lower, eps, start,
+                       start_slack)
+        index = fixed_sequence(bound <= eps, first)
+        return {"index": index, "bound": _take(bound, index, np.nan), "floor": _take(d_lower, index, 0.0)}
+
+    return certify_window
 
 
 def ltt_iid(benign_below, attack_below, eps, delta):

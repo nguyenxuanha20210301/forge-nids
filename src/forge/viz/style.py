@@ -9,6 +9,8 @@ import matplotlib as mpl
 # deficiencies. eight slots at most, a ninth method needs another channel than color
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 GRAY = "#7a7a75"
+# a series that stands for no method, such as the AUC of the scorer, so it borrows no method's color
+INK = "#3b3b38"
 # second channel for lines that would otherwise differ by color alone
 DASHES = ["-", "--", "-.", ":", (0, (5, 1, 1, 1)), (0, (1, 1))]
 # one blue from light to dark for magnitudes such as shares, so a heatmap stays readable in gray print. the lightest

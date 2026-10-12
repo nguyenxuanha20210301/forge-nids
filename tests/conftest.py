@@ -1,7 +1,8 @@
-"""tiny archives in the layout of the published LITNET-2020 and AnoShift files, written under a temporary storage
-root."""
+"""tiny archives in the layout of the published LITNET-2020 and AnoShift files, and a small processed AnoShift table
+whose features carry the label, written under a temporary storage root."""
 
 import hashlib
+import json
 import random
 import tarfile
 import zipfile
@@ -10,9 +11,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from forge.config import load_config
+from forge.data import anoshift
 from forge.data.litnet2020 import capture_name
 from forge.paths import configs_dir
 
@@ -185,3 +189,69 @@ def anoshift_source(tmp_path, monkeypatch):
     tar, expected, frames = write_anoshift_tar(tmp_path / "source", ANOSHIFT_YEARS)
     return SimpleNamespace(cfg=cfg, tar=tar, url=tar.as_uri(), tar_bytes=tar.stat().st_size,
                            tar_sha256=hashlib.sha256(tar.read_bytes()).hexdigest(), expected=expected, frames=frames)
+
+
+# label counts known, unknown and normal per year of a processed AnoShift table whose features carry the label, six
+# years so that train, selection, calibration and deployment each get their own. the last year has no unknown type,
+# as some blocks of the real FAR years have none
+ANOSHIFT_SIGNAL_YEARS = {2006: (1500, 40, 1500), 2007: (1200, 30, 1800), 2008: (1600, 40, 2400),
+                         2009: (3000, 60, 4000), 2010: (2400, 50, 1600), 2011: (2600, 0, 1400)}
+# the same with nearly as many unknown as known attacks in 2009, so that the unknown type can be its own family
+ANOSHIFT_FAMILY_YEARS = {**ANOSHIFT_SIGNAL_YEARS, 2009: (2000, 1500, 4000)}
+
+
+def anoshift_signal_frame(years, seed):
+    # attacks have more SYN errors and use other services, the unknown type sits between benign sessions and known
+    # attacks, so the low tail of the attack scores holds misses of both types. the other columns are noise. the last
+    # year brings a service that the earlier years never show
+    rng = np.random.default_rng(seed)
+    frames = []
+    for i, (year, (known, unknown, normal)) in enumerate(years.items()):
+        n = known + unknown + normal
+        kind = np.array(["known"] * known + ["unknown"] * unknown + ["benign"] * normal)
+        rng.shuffle(kind)
+        attack = kind != "benign"
+        level = np.select([kind == "known", kind == "unknown"], [0.62, 0.45], 0.3)
+
+        def rate(signal):
+            values = rng.normal(level, 0.15) if signal else rng.random(n)
+            return np.clip(values, 0, 1).round(2).astype(np.float32)
+
+        services = ANOSHIFT_SERVICES + (["ftp"] if i == len(years) - 1 else [])
+        service = np.where(attack & (rng.random(n) < 0.4), "other", rng.choice(services, n))
+        frames.append(pd.DataFrame({
+            "year": np.full(n, year, dtype=np.int16),
+            "order": np.sort(rng.choice(10 * n, size=n, replace=False)).astype(np.int32),
+            "label": attack.astype(np.int8),
+            "attack_type": pd.Categorical(kind, categories=anoshift.ATTACK_TYPES),
+            "duration_bin": rng.integers(-1, 60, n).astype(np.int16),
+            "service": pd.Categorical(service),
+            "src_bytes_bin": rng.integers(-1, 120, n).astype(np.int16),
+            "dst_bytes_bin": rng.integers(0, 120, n).astype(np.int16),
+            "count": rng.integers(0, 101, n).astype(np.int16),
+            "same_srv_rate": rate(False),
+            "serror_rate": rate(True),
+            "srv_serror_rate": rate(False),
+            "dst_host_count": rng.integers(0, 101, n).astype(np.int16),
+            "dst_host_srv_count": rng.integers(0, 101, n).astype(np.int16),
+            "dst_host_same_src_port_rate": rate(False),
+            "dst_host_serror_rate": rate(True),
+            "dst_host_srv_serror_rate": rate(False),
+            "flag": pd.Categorical(rng.choice(ANOSHIFT_FLAGS, n)),
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+
+@pytest.fixture
+def anoshift_signal(tmp_path, monkeypatch, request):
+    # written where anoshift.load finds it, in small row groups so that reading some years skips the others, with the
+    # one manifest field the experiments read. a test may pass other counts per year through indirect parametrization
+    monkeypatch.setenv("FORGE_STORAGE", str(tmp_path / "storage"))
+    cfg = load_config(configs_dir() / "data" / "anoshift.yaml")
+    frame = anoshift_signal_frame(getattr(request, "param", ANOSHIFT_SIGNAL_YEARS), seed=5)
+    out = anoshift.processed_dir(cfg)
+    out.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pandas(frame, schema=anoshift.SCHEMA, preserve_index=False), out / "flows.parquet",
+                   row_group_size=1000)
+    (out / "manifest.json").write_text(json.dumps({"fingerprint": anoshift.fingerprint(frame)}), encoding="utf-8")
+    return SimpleNamespace(cfg=cfg, frame=frame)
