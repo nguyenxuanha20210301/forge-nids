@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.ticker import FuncFormatter, NullFormatter
+from matplotlib.ticker import NullFormatter
 
 from forge import runs
 from forge.data import litnet2020, splits
@@ -18,7 +18,6 @@ from forge.viz import style
 from forge.viz.export import save_figure
 
 WINDOW_NAMES = {"D": "day", "W": "week", "M": "month"}
-PERCENT = FuncFormatter(lambda v, _: f"{v * 100:g}%")
 
 
 def _codes(column: pd.Series) -> np.ndarray:
@@ -141,7 +140,7 @@ def fig_prevalence_by_window(run_dir) -> plt.Figure:
     ax.set_xlim(windows["start"].min() - pad, windows["end"].max() + pad)
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-    ax.yaxis.set_major_formatter(PERCENT)
+    ax.yaxis.set_major_formatter(style.percent)
     ax.yaxis.set_minor_formatter(NullFormatter())
     ax.set_xlabel(f"{WINDOW_NAMES.get(freq, 'window')} start")
     ax.set_ylabel("attack prevalence")
@@ -172,7 +171,7 @@ def fig_family_mix_by_window(run_dir) -> plt.Figure:
         spine.set_visible(False)
     bar = fig.colorbar(mesh, ax=ax, fraction=0.05, pad=0.03)
     bar.set_label("share of attacks in the window")
-    bar.formatter = PERCENT
+    bar.formatter = style.percent
     bar.outline.set_visible(False)
     bar.ax.tick_params(length=0)
     return fig

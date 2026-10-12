@@ -52,3 +52,8 @@ def use() -> None:
 def color_for(name: str, order: list[str]) -> str:
     # order is the fixed list of method names for the experiment
     return COLORS[order.index(name) % len(COLORS)]
+
+
+def percent(v, _pos=None) -> str:
+    # tick label for a share, 0.001 as 0.1%, matplotlib takes the function itself as a tick formatter
+    return f"{v * 100:g}%"
