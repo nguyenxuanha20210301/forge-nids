@@ -10,6 +10,9 @@ COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
 GRAY = "#7a7a75"
 # second channel for lines that would otherwise differ by color alone
 DASHES = ["-", "--", "-.", ":", (0, (5, 1, 1, 1)), (0, (1, 1))]
+# one blue from light to dark for magnitudes such as shares, so a heatmap stays readable in gray print. the lightest
+# step keeps a contrast above 2 against white, which keeps a small value apart from an empty cell
+SEQUENTIAL = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
 
 # single column and double column widths in inches, close to most Elsevier and IEEE templates
 WIDTH_SINGLE = 3.5

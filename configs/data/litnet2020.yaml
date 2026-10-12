@@ -1,6 +1,8 @@
-# LITNET-2020, academic network traffic, about ten months from 2019 to 2020
+# LITNET-2020, eleven captures of a few minutes each from an academic network, between 2019-03-06 and 2020-01-31
 dataset:
   name: litnet2020
   raw_dir: litnet2020
   processed_version: v1
   window_freq: W
+  # flows are ordered and assigned to windows by their end, when the flow record exists
+  time_column: te

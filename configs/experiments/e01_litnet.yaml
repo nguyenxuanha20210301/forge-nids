@@ -1,0 +1,6 @@
+# flow count, attack prevalence and attack family mix of LITNET-2020 per calendar window and per capture
+inherit: [../base.yaml, ../data/litnet2020.yaml]
+
+experiment:
+  name: e01_litnet
+  module: litnet_overview

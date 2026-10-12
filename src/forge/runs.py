@@ -47,6 +47,11 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def git_state() -> dict:
+    # commit of the working copy the code runs from, and whether it has uncommitted changes
+    return {"commit": _git("rev-parse", "HEAD"), "dirty": bool(_git("status", "--porcelain"))}
+
+
 class Run:
     def __init__(self, cfg: dict, root: Path | None = None):
         self.cfg = cfg
