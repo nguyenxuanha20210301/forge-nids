@@ -2,9 +2,15 @@
 
 the authors publish the dataset in their GitHub repository, where the address given in the paper, dataset.litnet.lt,
 now redirects. it is twelve zip files, one per attack type, each holding one csv without a header row and 85 quoted
-columns per flow. each csv is a capture of a few minutes on one day between 2019-03-06 and 2020-01-31, benign traffic
-together with the flows of one attack, so the data is a set of short captures and not a continuous stream. the smurf
-and icmp flood archives hold the same csv, which carries both attack types, so eleven captures remain.
+columns per flow. each csv is a capture of about six minutes on one day between 2019-03-06 and 2020-01-31, benign
+traffic together with the flows of one attack, so the data is about 73 minutes of traffic in short captures and not a
+continuous stream. the smurf and icmp flood archives hold the same csv, which carries both attack types, so eleven
+captures remain.
+
+the syn flood archive holds only the first 6012524 rows of its capture, which end at 2019-12-03 02:56:37 while the
+attack went on until 03:10:33. it carries 1580016 of the 3725838 syn flood attacks in the paper. the other 2145822 are
+in SYN_FLOOD_ATTACKERS_ONLY.zip alone, whose row numbers count from the start of the original capture, without the
+benign flows of the same minutes, so adding them would raise the prevalence of the capture and they are left out.
 
 download fetches the archives at a fixed commit and keeps a file only when its size and sha256 match the published
 ones. prepare checks the hashes again, reads the eleven captures and writes the flow times, the label, the attack
@@ -138,7 +144,8 @@ FAMILY_LABELS = {
     "scanning": "scanning",
     "fragmentation": "fragmentation",
 }
-# flows and attacks per attack type in Table 4 of the paper, compared with the published files in the readme
+# flows and attacks per attack type in Table 4 of the paper, compared with the published files in the readme. the
+# attacks of the rows sum to 5254529, while the total row of the table says 5328934
 PAPER_TABLE4 = {
     "smurf": (3994426, 59479),
     "icmp_flood": (3863655, 11628),
