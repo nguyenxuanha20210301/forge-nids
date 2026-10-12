@@ -1,7 +1,8 @@
 # local mirror of the Drive project folder, data and runs live on Drive
 /drive/
 
-# proposal, plan and other notes stay on the local machine
+# working rules, proposal, plan and notes stay on the local machine
+/conventions/
 /docs/
 
 # python
