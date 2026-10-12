@@ -34,6 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from forge import paths
+from forge.data import digest
 from forge.runs import git_state
 
 PAPER = (
@@ -381,41 +382,9 @@ def read_capture(path: Path, captures: list[str], time_column: str, chunksize: i
     return flows.sort_values([time_column, "row_id"], kind="stable", ignore_index=True), seen
 
 
-def _digest(flows: pd.DataFrame) -> str:
-    # sha256 over the values of every column in row order, independent of the time unit and of the file layout
-    h = hashlib.sha256()
-    for field in SCHEMA:
-        col = flows[field.name]
-        if pa.types.is_timestamp(field.type):
-            data = col.to_numpy().astype("datetime64[s]").astype("<i8").tobytes()
-        elif pa.types.is_dictionary(field.type):
-            col = col.astype("category")
-            names, codes = np.asarray(col.cat.categories.astype(str), dtype=object), col.cat.codes.to_numpy()
-            if (codes < 0).any():
-                raise ValueError(f"{field.name} holds missing values")
-            data = ("\n".join(names[codes]) + "\n").encode()
-        elif pa.types.is_floating(field.type):
-            data = col.to_numpy(dtype="<f8").tobytes()
-        else:
-            data = col.to_numpy(dtype="<i8").tobytes()
-        h.update(field.name.encode() + b"\0" + hashlib.sha256(data).digest())
-    return h.hexdigest()
-
-
-def _combine(blocks) -> str:
-    h = hashlib.sha256()
-    for capture, digest in blocks:
-        h.update(f"{capture} {digest}\n".encode())
-    return h.hexdigest()
-
-
 def fingerprint(flows: pd.DataFrame) -> str:
     # recomputes the fingerprint of a full table read back with load, one digest per capture block in row order
-    codes = flows["capture"].astype("category")
-    names, codes = codes.cat.categories, codes.cat.codes.to_numpy()
-    starts = np.flatnonzero(np.r_[True, codes[1:] != codes[:-1]])
-    ends = np.r_[starts[1:], len(codes)]
-    return _combine((str(names[codes[s]]), _digest(flows.iloc[s:e])) for s, e in zip(starts, ends))
+    return digest.fingerprint(flows, "capture", SCHEMA)
 
 
 def _summary(flows: pd.DataFrame, name: str, time_column: str) -> dict:
@@ -431,7 +400,7 @@ def _summary(flows: pd.DataFrame, name: str, time_column: str) -> dict:
         "ts_min": flows["ts"].min(),
         "te_max": flows["te"].max(),
         "families": {str(k): int(v) for k, v in families.items() if v > 0},
-        "fingerprint": _digest(flows),
+        "fingerprint": digest.table_digest(flows, SCHEMA),
     }
 
 
@@ -509,7 +478,7 @@ def prepare(cfg: dict, log=print, files: dict | None = None, duplicates: dict | 
             "constant_columns": {c: sorted(v) for c, v in constants.items()},
         },
         "captures": [{k: str(v) if isinstance(v, pd.Timestamp) else v for k, v in s.items()} for s in summaries],
-        "fingerprint": _combine((s["capture"], s["fingerprint"]) for s in summaries),
+        "fingerprint": digest.combine((s["capture"], s["fingerprint"]) for s in summaries),
     }
     (partial / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     (partial / "readme.md").write_text(readme(manifest), encoding="utf-8")

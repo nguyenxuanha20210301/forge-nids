@@ -1,11 +1,15 @@
-"""tiny archives in the layout of the published LITNET-2020 files, written under a temporary storage root."""
+"""tiny archives in the layout of the published LITNET-2020 and AnoShift files, written under a temporary storage
+root."""
 
 import hashlib
 import random
+import tarfile
 import zipfile
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from forge.config import load_config
@@ -116,3 +120,68 @@ def litnet_like(tmp_path, monkeypatch):
         for i, (name, start, codes) in enumerate(PUBLISHED)
     }
     return write_raw(tmp_path, monkeypatch, captures, {"SMURF_FLOWS.zip": "ICMP_FLOOD_FLOWS.zip"})
+
+
+# label counts known, unknown and normal of the tiny AnoShift test files, one year from each period of the protocol
+ANOSHIFT_YEARS = {2006: (40, 5, 15), 2011: (60, 4, 16), 2014: (55, 1, 14)}
+ANOSHIFT_SERVICES = ["other", "ssh", "smtp", "dns", "http", "smtp,ssl"]
+ANOSHIFT_FLAGS = ["S0", "SF", "OTH", "REJ", "RSTO"]
+
+
+def anoshift_frame(counts, seed):
+    # one test file in the published layout, string columns, rows in shuffled order and the row position in the year
+    # as the pandas index, a sample of positions as in a 10% file
+    rng = np.random.default_rng(seed)
+    codes = ["-1"] * counts[0] + ["-2"] * counts[1] + ["1"] * counts[2]
+    n = len(codes)
+    rng.shuffle(codes)
+
+    def rates():
+        return [f"{v:.2f}" for v in rng.integers(0, 101, n) / 100]
+
+    frame = pd.DataFrame({
+        "0": [f"c0{b}" for b in rng.integers(0, 232, n)],
+        "1": rng.choice(ANOSHIFT_SERVICES, n),
+        "2": [f"c2{b}" for b in rng.integers(0, 232, n)],
+        "3": [f"c3{b}" for b in rng.integers(0, 232, n)],
+        "4": rng.integers(0, 101, n).astype(str),
+        "5": rates(), "6": rates(), "7": rates(),
+        "8": rng.integers(0, 101, n).astype(str),
+        "9": rng.integers(0, 101, n).astype(str),
+        "10": rates(), "11": rates(), "12": rates(),
+        "13": rng.choice(ANOSHIFT_FLAGS, n),
+        "18": codes,
+    }, index=pd.Index(rng.choice(10 * n, size=n, replace=False)))
+    # a value above the last bin edge, written nan by the authors
+    frame.iloc[0, frame.columns.get_loc("2")] = "nan"
+    return frame
+
+
+def write_anoshift_tar(folder, years):
+    # the tar layout of the published data, the test files among train and subset files that download must skip
+    root = folder / "Kyoto-2016_AnoShift"
+    (root / "full").mkdir(parents=True)
+    (root / "subset").mkdir()
+    frames, expected = {}, {}
+    for i, (year, counts) in enumerate(years.items()):
+        frames[year] = anoshift_frame(counts, seed=10 + i)
+        test = root / "full" / f"{year}_full_valid.parquet"
+        frames[year].to_parquet(test)
+        anoshift_frame(counts, seed=20 + i).to_parquet(root / "full" / f"{year}_full.parquet")
+        anoshift_frame(counts, seed=30 + i).to_parquet(root / "subset" / f"{year}_subset.parquet")
+        expected[year] = {"bytes": test.stat().st_size, "rows": sum(counts), "known": counts[0], "unknown": counts[1],
+                          "normal": counts[2]}
+    tar = folder / "Kyoto-2016_AnoShift.tar"
+    with tarfile.open(tar, "w") as out:
+        out.add(root, arcname=root.name)
+    return tar, expected, frames
+
+
+@pytest.fixture
+def anoshift_source(tmp_path, monkeypatch):
+    storage = tmp_path / "storage"
+    monkeypatch.setenv("FORGE_STORAGE", str(storage))
+    cfg = load_config(configs_dir() / "data" / "anoshift.yaml")
+    tar, expected, frames = write_anoshift_tar(tmp_path / "source", ANOSHIFT_YEARS)
+    return SimpleNamespace(cfg=cfg, tar=tar, url=tar.as_uri(), tar_bytes=tar.stat().st_size, expected=expected,
+                           frames=frames)

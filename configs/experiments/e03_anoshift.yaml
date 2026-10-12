@@ -1,0 +1,6 @@
+# session count, attack share and service mix of AnoShift per year and per block of equal size within a year
+inherit: [../base.yaml, ../data/anoshift.yaml]
+
+experiment:
+  name: e03_anoshift
+  module: anoshift_overview

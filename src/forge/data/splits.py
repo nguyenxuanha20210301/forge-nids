@@ -34,3 +34,18 @@ def split_by_windows(windows: np.ndarray, roles: dict) -> dict:
     if len(used) != len(set(used)):
         raise ValueError("a window is assigned to more than one role")
     return {role: np.isin(windows, ids) for role, ids in roles.items()}
+
+
+def order_blocks(groups, per_group: int) -> np.ndarray:
+    # blocks of equal row count within each group, in row order, for data without clock time. the rows of a group must
+    # sit together, and a group with fewer rows than blocks leaves some block numbers unused
+    if per_group < 1:
+        raise ValueError(f"per_group is {per_group}, expected 1 or more")
+    groups = np.asarray(groups)
+    starts = np.flatnonzero(np.r_[True, groups[1:] != groups[:-1]])
+    if len(np.unique(groups[starts])) != len(starts):
+        raise ValueError("the rows of a group are not consecutive")
+    lengths = np.diff(np.r_[starts, len(groups)])
+    run = np.repeat(np.arange(len(starts)), lengths)
+    position = np.arange(len(groups)) - starts[run]
+    return position * per_group // lengths[run]

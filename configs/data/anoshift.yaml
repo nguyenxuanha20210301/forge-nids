@@ -1,6 +1,7 @@
-# Kyoto 2006 plus through the AnoShift benchmark, about ten years
+# AnoShift, the Kyoto 2006+ honeypot sessions of 2006 to 2015 as preprocessed by Bitdefender, the test file of each year
 dataset:
   name: anoshift
   raw_dir: anoshift
   processed_version: v1
-  window_freq: Y
+  # each year split into this many blocks of equal session count in the original row order, the data has no clock time
+  blocks_per_year: 12

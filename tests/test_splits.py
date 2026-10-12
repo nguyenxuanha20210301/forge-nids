@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from forge.data.splits import assign_windows, calendar_windows, split_by_windows
+from forge.data.splits import assign_windows, calendar_windows, order_blocks, split_by_windows
 
 
 def stamps(*values):
@@ -41,3 +41,15 @@ def test_missing_timestamp_is_rejected():
 def test_a_window_has_one_role():
     with pytest.raises(ValueError):
         split_by_windows(np.arange(5), {"train": [0, 1], "calibrate": [1, 2]})
+
+
+def test_order_blocks_split_each_group_into_equal_runs():
+    groups = np.array([2006] * 10 + [2007] * 4 + [2008] * 2)
+    blocks = order_blocks(groups, 4)
+    assert blocks[:10].tolist() == [0, 0, 0, 1, 1, 2, 2, 2, 3, 3]
+    assert blocks[10:14].tolist() == [0, 1, 2, 3]
+    assert blocks[14:].tolist() == [0, 2]
+    with pytest.raises(ValueError):
+        order_blocks(np.array([1, 1, 2, 1]), 2)
+    with pytest.raises(ValueError):
+        order_blocks(groups, 0)
