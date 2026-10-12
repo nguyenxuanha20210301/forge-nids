@@ -4,8 +4,11 @@ import pandas as pd
 from forge import experiments, runs
 from forge.config import load_config
 from forge.data import litnet2020
+from forge.experiments import litnet_overview
 from forge.paths import configs_dir
 from forge.runs import Run
+
+from conftest import PUBLISHED
 
 
 def test_e01_tables_and_figures(litnet_raw, tmp_path):
@@ -43,3 +46,38 @@ def test_e01_tables_and_figures(litnet_raw, tmp_path):
     names = {p.name for p in run.figures.iterdir()}
     for figure in experiments.get("litnet_overview").FIGURES:
         assert {f"{figure}.png", f"{figure}.pdf", f"{figure}_a4.pdf"} <= names
+
+
+def test_e01_on_the_layout_of_the_published_data(litnet_like, tmp_path):
+    # eleven captures and twelve families, more categories than the small fixtures, on the dates of the real captures
+    cfg = load_config(configs_dir() / "experiments" / "e01_litnet.yaml")
+    litnet2020.prepare(cfg, files=litnet_like.files, duplicates=litnet_like.duplicates, log=lambda m: None)
+    run = Run(cfg, root=tmp_path / "runs")
+    experiments.get("litnet_overview").run(cfg, run)
+    run.finish()
+
+    windows = runs.load_table(run.dir, "windows")
+    assert len(windows) == 48
+    assert windows.loc[windows["n_flows"] > 0, "captures"].tolist() == [
+        "udp_flood", "reaper_worm", "fragmentation", "syn_flood", "spam", "http_flood",
+        "scanning_spread+blaster_worm", "land_attack+red_worm+icmp_flood",
+    ]
+    captures = runs.load_table(run.dir, "captures")
+    assert captures["capture"].tolist() == [litnet2020.capture_name(name) for name, _, _ in PUBLISHED]
+    assert captures.set_index("capture").loc["icmp_flood", "families"] == "smurf+icmp_flood"
+    mix = runs.load_table(run.dir, "family_mix")
+    assert mix.groupby("family")["n_attacks"].sum().gt(0).all()
+
+
+def test_capture_table_counts_beyond_int8_codes():
+    # category codes are int8 below 128 categories, so arithmetic on them must not stay in int8
+    names = [f"c{i:02d}" for i in range(12)]
+    flows = pd.DataFrame({
+        "te": pd.date_range("2020-01-01", periods=len(names), freq="h"),
+        "label": np.ones(len(names), dtype=np.int8),
+        "family": pd.Categorical(["fragmentation"] * len(names), categories=litnet2020.FAMILY_ORDER),
+        "capture": pd.Categorical(names, categories=names),
+    })
+    table = litnet_overview.capture_table(flows, "te")
+    assert table["capture"].tolist() == names
+    assert (table["families"] == "fragmentation").all()

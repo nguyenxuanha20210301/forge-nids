@@ -9,7 +9,23 @@ from types import SimpleNamespace
 import pytest
 
 from forge.config import load_config
+from forge.data.litnet2020 import capture_name
 from forge.paths import configs_dir
+
+# archive, first flow end and attack codes of each published capture, the icmp flood archive holds two families
+PUBLISHED = [
+    ("UDP_FLOOD_FLOWS.zip", datetime(2019, 3, 6, 21, 13, 58), ["udp_f"]),
+    ("REAPER_WORM_FLOWS.zip", datetime(2019, 10, 2, 7, 48, 53), ["udp_reaper_w"]),
+    ("FRAGMENTATION_FLOWS.zip", datetime(2019, 11, 15, 5, 8, 59), ["udp_0"]),
+    ("SYN_FLOOD_FLOWS.zip", datetime(2019, 12, 3, 2, 44, 56), ["tcp_syn_f"]),
+    ("SPAM_FLOWS.zip", datetime(2020, 1, 6, 2, 13, 59), ["smtp_b"]),
+    ("HTTP_FLOOD_FLOWS.zip", datetime(2020, 1, 16, 9, 28, 57), ["http_f"]),
+    ("SCANNING_SPREAD_FLOWS.zip", datetime(2020, 1, 21, 8, 38, 58), ["tcp_udp_win_p"]),
+    ("BLASTER_WORM_FLOWS.zip", datetime(2020, 1, 25, 3, 43, 56), ["tcp_w32_w"]),
+    ("LAND_ATTACK_FLOWS.zip", datetime(2020, 1, 30, 12, 13, 56), ["tcp_land"]),
+    ("RED_WORM_FLOWS.zip", datetime(2020, 1, 30, 20, 31, 7), ["tcp_red_w"]),
+    ("ICMP_FLOOD_FLOWS.zip", datetime(2020, 1, 31, 15, 34, 58), ["icmp_smf", "icmp_f"]),
+]
 
 
 def litnet_line(row_id, te, attack_t="none", attack_a=0, td=0.0, pr="TCP", flags="....S.", sp=40000, dp=80):
@@ -49,36 +65,54 @@ def capture_rows(start, kinds, seed):
     return rows
 
 
-def build(tmp_path, monkeypatch, start_a, start_b):
+def write_raw(tmp_path, monkeypatch, captures, duplicates):
+    # captures maps an archive name to its rows, duplicates maps a copy to the archive whose csv it repeats
     storage = tmp_path / "storage"
     monkeypatch.setenv("FORGE_STORAGE", str(storage))
     cfg = load_config(configs_dir() / "data" / "litnet2020.yaml")
     raw = storage / "data" / "raw" / cfg["dataset"]["raw_dir"]
     raw.mkdir(parents=True)
+    archives = {**captures, **{copy: captures[original] for copy, original in duplicates.items()}}
+    for name, rows in archives.items():
+        lines = [litnet_line(r["row_id"], r["te"], r["attack_t"], r["attack_a"], pr=r["pr"], flags=r["flags"])
+                 for r in rows]
+        write_archive(raw / name, name.replace("_FLOWS.zip", "_v2.csv"), lines)
+    files = {}
+    for name in sorted(archives):
+        data = (raw / name).read_bytes()
+        files[name] = (len(data), hashlib.sha256(data).hexdigest())
+    rows = [{**r, "capture": capture_name(name)} for name, capture in captures.items() for r in capture]
+    return SimpleNamespace(cfg=cfg, raw=raw, files=files, duplicates=duplicates, rows=rows)
+
+
+def two_captures(tmp_path, monkeypatch, start_a, start_b):
     # capture a mixes two families on icmp, capture b mixes benign tcp with udp flood flows and hex flag strings
     a = capture_rows(start_a, [("none", "ICMP", "......")] * 9 + [("icmp_smf", "ICMP", "......")] * 4
                      + [("icmp_f", "ICMP", "......")] * 2, seed=1)
     b = capture_rows(start_b, [("none", "TCP", "....S.")] * 10 + [("none", "TCP", "  0xc2")] * 2
                      + [("udp_f", "UDP", "......")] * 5, seed=2)
-    for name, member, rows in (("A_FLOWS.zip", "A_v2.csv", a), ("B_FLOWS.zip", "B_v2.csv", b),
-                               ("C_FLOWS.zip", "C_v2.csv", a)):
-        lines = [litnet_line(r["row_id"], r["te"], r["attack_t"], r["attack_a"], pr=r["pr"], flags=r["flags"])
-                 for r in rows]
-        write_archive(raw / name, member, lines)
-    files = {}
-    for name in ("A_FLOWS.zip", "B_FLOWS.zip", "C_FLOWS.zip"):
-        data = (raw / name).read_bytes()
-        files[name] = (len(data), hashlib.sha256(data).hexdigest())
-    rows = [{**r, "capture": "a"} for r in a] + [{**r, "capture": "b"} for r in b]
-    return SimpleNamespace(cfg=cfg, raw=raw, files=files, duplicates={"C_FLOWS.zip": "A_FLOWS.zip"}, rows=rows)
+    return write_raw(tmp_path, monkeypatch, {"A_FLOWS.zip": a, "B_FLOWS.zip": b}, {"C_FLOWS.zip": "A_FLOWS.zip"})
 
 
 @pytest.fixture
 def litnet_raw(tmp_path, monkeypatch):
     # b in the week of 2019-12-30, a in the week of 2020-01-13, the week between them holds nothing
-    return build(tmp_path, monkeypatch, start_a=datetime(2020, 1, 15, 10, 0, 0), start_b=datetime(2020, 1, 1, 10, 0, 0))
+    return two_captures(tmp_path, monkeypatch, start_a=datetime(2020, 1, 15, 10, 0, 0),
+                        start_b=datetime(2020, 1, 1, 10, 0, 0))
 
 
 @pytest.fixture
 def litnet_overlapping(tmp_path, monkeypatch):
-    return build(tmp_path, monkeypatch, start_a=datetime(2020, 1, 1, 10, 0, 20), start_b=datetime(2020, 1, 1, 10, 0, 0))
+    return two_captures(tmp_path, monkeypatch, start_a=datetime(2020, 1, 1, 10, 0, 20),
+                        start_b=datetime(2020, 1, 1, 10, 0, 0))
+
+
+@pytest.fixture
+def litnet_like(tmp_path, monkeypatch):
+    # the eleven captures and the duplicate smurf archive of the published dataset, a few flows each, on their dates
+    captures = {
+        name: capture_rows(start, [("none", "TCP", "....S.")] * 6 + [(code, "TCP", "....S.") for code in codes] * 2,
+                           seed=i)
+        for i, (name, start, codes) in enumerate(PUBLISHED)
+    }
+    return write_raw(tmp_path, monkeypatch, captures, {"SMURF_FLOWS.zip": "ICMP_FLOOD_FLOWS.zip"})

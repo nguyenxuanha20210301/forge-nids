@@ -21,6 +21,11 @@ WINDOW_NAMES = {"D": "day", "W": "week", "M": "month"}
 PERCENT = FuncFormatter(lambda v, _: f"{v * 100:g}%")
 
 
+def _codes(column: pd.Series) -> np.ndarray:
+    # pandas keeps category codes in int8 below 128 categories, so arithmetic on them wraps around without a widening
+    return column.cat.codes.to_numpy().astype(np.int64)
+
+
 def window_table(flows: pd.DataFrame, t: str, freq: str) -> tuple[pd.DataFrame, np.ndarray]:
     ids = splits.assign_windows(flows[t], freq)
     table = splits.calendar_windows(flows[t], freq)
@@ -44,7 +49,7 @@ def family_mix(flows: pd.DataFrame, ids: np.ndarray, windows: pd.DataFrame) -> p
     # attack flows of each family in each window and their share of the attacks in that window, every window and
     # family listed, with an empty share where a window has no attacks
     attack = flows["label"].to_numpy() == 1
-    codes = flows["family"].cat.codes.to_numpy()[attack]
+    codes = _codes(flows["family"])[attack]
     k = len(litnet2020.FAMILY_ORDER)
     counts = np.bincount(ids[attack] * k + codes, minlength=len(windows) * k).reshape(len(windows), k)[:, 1:]
     total = counts.sum(axis=1, keepdims=True)
@@ -66,7 +71,7 @@ def capture_table(flows: pd.DataFrame, t: str) -> pd.DataFrame:
     attack = flows["label"].to_numpy() == 1
     names = flows["capture"].cat.categories
     k = len(litnet2020.FAMILY_ORDER)
-    pairs = flows["capture"].cat.codes.to_numpy()[attack] * k + flows["family"].cat.codes.to_numpy()[attack]
+    pairs = _codes(flows["capture"])[attack] * k + _codes(flows["family"])[attack]
     counts = np.bincount(pairs, minlength=len(names) * k).reshape(len(names), k)
     present = {str(c): "+".join(f for f, n in zip(litnet2020.FAMILY_ORDER, row) if n > 0) for c, row in zip(names, counts)}
     table = table.rename_axis("capture").reset_index()
