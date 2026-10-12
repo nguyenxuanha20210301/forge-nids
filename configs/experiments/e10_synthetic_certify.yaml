@@ -11,6 +11,10 @@ certify:
   # the rest of delta goes to the miss rate bound of each attack family, with no split over the families
   delta_benign: 0.025
   pi_max: 0.1
+  # the sequence starts at the loosest threshold that would pass with up to start_misses misses in every family, as
+  # long as it dismisses at most start_slack more than the first threshold that would pass with no miss
+  start_misses: 2
+  start_slack: 0.05
   # thresholds at the benign quantiles j / (grid_size + 1)
   grid_size: 200
 

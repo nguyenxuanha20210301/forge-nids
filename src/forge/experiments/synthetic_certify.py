@@ -11,7 +11,7 @@ what each method claims.
     forge_pooled    every prevalence up to pi_max with the family mix of the calibration set
     ltt_iid         the prevalence and the family mix of the calibration set
     forge_strict    the claim of forge_simplex, with the sequence started at the strictest grid threshold, which shows
-                    why FORGE-Certify starts where a threshold could first pass
+                    why FORGE-Certify starts near where a threshold could first pass
 
 a FORGE claim also holds the automation floor. the figures show the FOR part, except panel a over sizes, which shows
 the whole claim, as the summary does.
@@ -81,13 +81,14 @@ class Truth:
 def certify_draws(method: str, d, c: dict) -> dict:
     # certified index, FOR bound and automation floor of one method on every calibration set of d
     args = (c["epsilon"], c["delta"], c["pi_max"], c["delta_benign"])
+    start = {"start_misses": c["start_misses"], "start_slack": c["start_slack"]}
     pooled_below, pooled_n = d.family_below.sum(1, keepdims=True), d.n_family.sum(1, keepdims=True)
     if method == "forge_simplex":
-        return certify(d.benign_below, d.n_benign, d.family_below, d.n_family, *args)
+        return certify(d.benign_below, d.n_benign, d.family_below, d.n_family, *args, **start)
     if method == "forge_strict":
         return certify(d.benign_below, d.n_benign, d.family_below, d.n_family, *args, start="strictest")
     if method == "forge_pooled":
-        return certify(d.benign_below, d.n_benign, pooled_below, pooled_n, *args)
+        return certify(d.benign_below, d.n_benign, pooled_below, pooled_n, *args, **start)
     if method == "ltt_iid":
         out = ltt_iid(d.benign_below, pooled_below[:, 0], c["epsilon"], c["delta"])
         return {**out, "floor": np.full(out["index"].shape, np.nan)}
@@ -179,7 +180,8 @@ def run(cfg: dict, run: runs.Run) -> None:
                 f"{int(top['size'])}, 95% interval {top['joint_low']:.4f} to {top['joint_high']:.4f}, delta {delta}, "
                 f"above delta beyond simulation noise {exceeds[method]}")
     run.save_json({
-        "epsilon": eps, "delta": delta, "delta_benign": c["delta_benign"], "pi_max": pi_max, "prevalence": pi_cal,
+        "epsilon": eps, "delta": delta, "delta_benign": c["delta_benign"], "pi_max": pi_max,
+        "start_misses": c["start_misses"], "start_slack": c["start_slack"], "prevalence": pi_cal,
         "grid_size": c["grid_size"], "benign": s["benign"], "families": s["families"], "draws": draws,
         "sizes": sizes, "main_size": sim["main_size"], "methods": methods, "oracle_benign_rate": oracle,
         "largest_claim_violation": largest, "claim_exceeds_delta": exceeds,

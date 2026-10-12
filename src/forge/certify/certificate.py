@@ -14,13 +14,17 @@ largest true miss rate there. so no correction is needed for the number of thres
 and every family bound takes all of delta_m. a set of mixes that caps the family shares has its worst mix spread over
 several families, and would need delta_m split over them.
 
-the sequence starts at the strictest threshold that could pass with no attack at or below it, not at t_1. with no
-misses the miss rate bound of a family is still about ln(1 / delta_m) / n_k, so where b is small the bound stays far
-above epsilon whatever the attack scores are. with epsilon 1e-3, pi_max 0.1 and a grid of 200 benign quantiles, a
-sequence starting at t_1 stops at once unless every family has more than about 80,000 calibration attacks. the start
-depends on the benign counts, so the benign bound must hold for every threshold at once, which the one sided DKW bound
-does. given the benign scores and the family sizes the start is fixed and the attack scores are still independent
-draws, so the argument above holds as it is. the uniform benign bound also keeps the automation floor
+the sequence does not start at t_1. with no misses the miss rate bound of a family is still about ln(1 / delta_m) / n_k,
+so where b is small the bound stays far above epsilon whatever the attack scores are. with epsilon 1e-3, pi_max 0.1
+and a grid of 200 benign quantiles, a sequence starting at t_1 stops at once unless every family has more than about
+80,000 calibration attacks. the first threshold that could pass with no attack at or below it is the strictest
+sensible start, but it passes only with no miss, so a single miss there ends the sequence at once. the start therefore
+moves to the loosest threshold that could still pass with up to start_misses misses in every family, as long as it
+dismisses at most start_slack more than that first threshold, and stays put where that costs more, which happens when
+the attack samples are small and the first threshold is already late. the start depends on the benign counts and the
+family sizes only, so the benign bound must hold for every threshold at once, which the one sided DKW bound does.
+given the benign scores and the family sizes the start is fixed and the attack scores are still independent draws,
+so the argument above holds as it is. the uniform benign bound also keeps the automation floor
 (1 - pi_max) b_lower valid at the chosen threshold, which a bound holding at each threshold separately would not.
 
 the online variant of Theorem 1b certifies one deployment window. its rate is also pi m / D, with D the share of all
@@ -90,60 +94,80 @@ def _share_lower(below, n, delta_part):
     return np.clip(share - np.asarray(dkw_margin(n, delta_part))[..., None], 0, None)
 
 
-def _miss_upper(attack_below, n_attack, delta_miss):
-    # the largest family bound at each threshold, and the largest bound a family has with no miss, which fixes where
-    # a threshold could first pass
+def _miss_upper(attack_below, n_attack, delta_miss, misses):
+    # the largest family bound at each threshold, and for r from 0 to misses the largest bound a family has with r
+    # misses, which fixes where a threshold could pass
+    if misses < 0:
+        raise ValueError(f"start_misses is {misses}, expected 0 or more")
     attack_below = np.asarray(attack_below)
     n_attack = np.asarray(n_attack)
     m_upper = clopper_pearson_upper(attack_below, n_attack[..., None], delta_miss).max(-2)
-    m_zero = np.asarray(clopper_pearson_upper(np.zeros_like(n_attack), n_attack, delta_miss)).max(-1)
-    return m_upper, m_zero
+    m_with = [np.asarray(clopper_pearson_upper(np.full(n_attack.shape, r), n_attack, delta_miss)).max(-1)
+              for r in range(misses + 1)]
+    return m_upper, m_with
 
 
-def _walk(bound, bound_with_no_miss, eps, start):
-    # index of the certified threshold, -1 when none is certified
+def _start(with_misses, share_lower, eps, start, slack):
+    # with_misses[r] is the bound at each threshold when every family has r misses there. the start is the loosest
+    # threshold that would pass with up to that many misses, as long as its lower bound on the dismissed share exceeds
+    # the one of the first threshold that would pass with no miss by at most slack
     if start not in STARTS:
         raise ValueError(f"start is {start}, expected one of {', '.join(STARTS)}")
-    if start == "feasible":
-        first = first_index(bound_with_no_miss <= eps)
-    else:
-        first = np.zeros(bound.shape[:-1], dtype=int)
-    return fixed_sequence(bound <= eps, first)
+    shape = np.broadcast_shapes(*(b.shape for b in with_misses))
+    if start == "strictest":
+        return np.zeros(shape[:-1], dtype=int)
+    g = shape[-1]
+    share_lower = np.broadcast_to(share_lower, shape)
+    starts = [first_index(b <= eps) for b in with_misses]
+    first = starts[0]
+    base = _take(share_lower, np.where(first < g, first, -1), np.nan)
+    for s in starts[1:]:
+        later = _take(share_lower, np.where(s < g, s, -1), np.inf)
+        first = np.where((s < g) & (later - base <= slack), s, first)
+    return first
 
 
-def certify(benign_below, n_benign, attack_below, n_attack, eps, delta, pi_max, delta_benign=None, start="feasible"):
+def certify(benign_below, n_benign, attack_below, n_attack, eps, delta, pi_max, delta_benign=None, start="feasible",
+            start_misses=2, start_slack=0.05):
     """FORGE-Certify on counts at or below each grid threshold.
 
     benign_below has shape (..., G) and attack_below (..., K, G) with one row per attack family, n_benign has shape (...)
     and n_attack (..., K). leading axes are independent calibration sets. with K families the bound covers every family
     mix, with the families summed into one row it covers only the mix of the calibration set. delta_benign goes to the
-    benign bound and the rest of delta to each family bound. returns the index of the certified threshold, -1 when none
-    is certified, its FOR bound and the automation floor.
+    benign bound and the rest of delta to each family bound. start_misses and start_slack set where the sequence starts,
+    see above, start_misses 0 starts at the first threshold that could pass with no miss. returns the index of the
+    certified threshold, -1 when none is certified, its FOR bound and the automation floor.
     """
     delta_benign = delta / 2 if delta_benign is None else delta_benign
-    m_upper, m_zero = _miss_upper(attack_below, n_attack, _rest_of_delta(delta, delta_benign, "delta_benign"))
+    m_upper, m_with = _miss_upper(attack_below, n_attack, _rest_of_delta(delta, delta_benign, "delta_benign"),
+                                  start_misses)
     b_lower = _share_lower(benign_below, n_benign, delta_benign)
     bound = for_from_rates(pi_max, m_upper, b_lower)
-    index = _walk(bound, for_from_rates(pi_max, m_zero[..., None], b_lower), eps, start)
+    first = _start([for_from_rates(pi_max, m[..., None], b_lower) for m in m_with], b_lower, eps, start, start_slack)
+    index = fixed_sequence(bound <= eps, first)
     return {"index": index, "bound": _take(bound, index, np.nan), "floor": (1 - pi_max) * _take(b_lower, index, 0.0)}
 
 
 def certify_online(window_below, n_window, attack_below, n_attack, eps, delta, pi_max, delta_window=None,
-                   start="feasible"):
+                   start="feasible", start_misses=2, start_slack=0.05):
     """FORGE-Certify on one deployment window, the online variant of Theorem 1b.
 
     window_below has shape (..., G) and counts the window's flows at or below each threshold whatever their label, out
     of n_window flows, shape (...). attack_below and n_attack are the counts of D_cal as in certify, and they broadcast
     against the leading axes of the window, so one calibration set serves many windows. delta_window goes to the bound
-    on the window's dismissed share and the rest of delta to each family bound. returns the index of the certified
-    threshold, -1 when none is certified, its FOR bound and the automation floor, a lower bound on the share of the
-    window's flows dismissed.
+    on the window's dismissed share and the rest of delta to each family bound. the start follows the rule of certify,
+    with the window's dismissed share in place of the benign one. returns the index of the certified threshold, -1 when
+    none is certified, its FOR bound and the automation floor, a lower bound on the share of the window's flows
+    dismissed.
     """
     delta_window = delta / 2 if delta_window is None else delta_window
-    m_upper, m_zero = _miss_upper(attack_below, n_attack, _rest_of_delta(delta, delta_window, "delta_window"))
+    m_upper, m_with = _miss_upper(attack_below, n_attack, _rest_of_delta(delta, delta_window, "delta_window"),
+                                  start_misses)
     d_lower = _share_lower(window_below, n_window, delta_window)
     bound = for_from_dismissed(pi_max, m_upper, d_lower)
-    index = _walk(bound, for_from_dismissed(pi_max, m_zero[..., None], d_lower), eps, start)
+    first = _start([for_from_dismissed(pi_max, m[..., None], d_lower) for m in m_with], d_lower, eps, start,
+                   start_slack)
+    index = fixed_sequence(bound <= eps, first)
     return {"index": index, "bound": _take(bound, index, np.nan), "floor": _take(d_lower, index, 0.0)}
 
 
@@ -184,17 +208,17 @@ def _on_grid(out, grid, names):
 
 
 def certify_scores(benign_scores, attack_scores, families, grid, eps, delta, pi_max, delta_benign=None,
-                   start="feasible"):
+                   start="feasible", start_misses=2, start_slack=0.05):
     attack_below, n_attack, names = _family_counts(attack_scores, families, grid)
     out = certify(counts_below(benign_scores, grid), len(benign_scores), attack_below, n_attack, eps, delta, pi_max,
-                  delta_benign, start)
+                  delta_benign, start, start_misses, start_slack)
     return _on_grid(out, grid, names)
 
 
 def certify_online_scores(window_scores, attack_scores, families, grid, eps, delta, pi_max, delta_window=None,
-                          start="feasible"):
+                          start="feasible", start_misses=2, start_slack=0.05):
     # the window's scores carry no labels, the attack scores and their families come from D_cal
     attack_below, n_attack, names = _family_counts(attack_scores, families, grid)
     out = certify_online(counts_below(window_scores, grid), len(window_scores), attack_below, n_attack, eps, delta,
-                         pi_max, delta_window, start)
+                         pi_max, delta_window, start, start_misses, start_slack)
     return _on_grid(out, grid, names)

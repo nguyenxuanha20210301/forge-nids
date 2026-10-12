@@ -90,6 +90,20 @@ def test_feasible_start_skips_thresholds_that_cannot_pass():
         certify(**counts, eps=1e-3, delta=0.05, pi_max=0.1, start="loosest")
 
 
+@pytest.mark.parametrize("fn", [certify, certify_online])
+def test_start_tolerates_misses_within_the_slack(fn):
+    # 10^6 flows with shares 0.01, 0.02, 0.03, 0.05, 0.08 and 0.2 at the thresholds, one family of 10^4 attacks with one
+    # miss from the fourth threshold on. the fourth is the first that would pass with no miss, so that one miss ends a
+    # sequence starting there. the fifth would pass with one miss and dismisses 0.03 more
+    below, n, attack, n_attack = np.array([1, 2, 3, 5, 8, 20]) * 10000, 1000000, np.array([[0, 0, 0, 1, 1, 1]]), [10000]
+    args = dict(eps=1e-3, delta=0.05, pi_max=0.1)
+    assert fn(below, n, attack, np.array(n_attack), **args, start_misses=0)["index"] == -1
+    assert fn(below, n, attack, np.array(n_attack), **args)["index"] == 5
+    assert fn(below, n, attack, np.array(n_attack), **args, start_slack=0.02)["index"] == -1
+    with pytest.raises(ValueError):
+        fn(below, n, attack, np.array(n_attack), **args, start_misses=-1)
+
+
 def test_bound_takes_the_worst_family_at_the_whole_delta_m():
     benign_below, n_benign = np.array([1, 2, 3, 6, 9]) * 100000, 1000000
     families = np.array([[0, 1, 2, 3, 9], [0, 0, 0, 5, 30]])

@@ -50,6 +50,7 @@ FIGURE_COMPOSITIONS = {"violation": "worst", "dismiss": "typical"}
 def run(cfg: dict, run: runs.Run) -> None:
     c, s, dep, sim = cfg["certify"], cfg["synthetic"], cfg["deployment"], cfg["simulation"]
     eps, delta, pi_max, part = c["epsilon"], c["delta"], c["pi_max"], c["delta_benign"]
+    start = {"start_misses": c["start_misses"], "start_slack": c["start_slack"]}
     methods, draws, windows, sizes = sim["methods"], sim["draws"], dep["windows"], dep["window_sizes"]
     if dep["main_window_size"] not in sizes:
         raise ValueError(f"main window size {dep['main_window_size']} is not among the window sizes {sizes}")
@@ -65,7 +66,8 @@ def run(cfg: dict, run: runs.Run) -> None:
     cells = [(sc, co, n) for sc in dep["scenarios"] for co in dep["compositions"] for n in sizes]
     seeds = np.random.SeedSequence(cfg["seed"]).spawn(1 + len(cells))
     cal = draw_counts(np.random.default_rng(seeds[0]), s["calibration_size"], s["prevalence"], shares, b_cal, m, draws)
-    offline = certify(cal.benign_below, cal.n_benign, cal.family_below, cal.n_family, eps, delta, pi_max, part)
+    offline = certify(cal.benign_below, cal.n_benign, cal.family_below, cal.n_family, eps, delta, pi_max, part,
+                      **start)
     run.log(f"calibration sets of {s['calibration_size']} flows, the offline certificate refused in "
             f"{np.mean(offline['index'] < 0):.3f} of draws")
 
@@ -93,7 +95,7 @@ def run(cfg: dict, run: runs.Run) -> None:
             attack_below[w] = d.family_below.sum(1)
             window_below[w] = d.benign_below + attack_below[w]
         online = certify_online(window_below, np.full(window_below.shape[:-1], n), cal.family_below, cal.n_family,
-                                eps, delta, pi_max, part)
+                                eps, delta, pi_max, part, **start)
         online_index[i] = online["index"]
         certified = {
             "forge_simplex": (np.broadcast_to(offline["index"], online["index"].shape),
@@ -166,7 +168,7 @@ def run(cfg: dict, run: runs.Run) -> None:
                     f"FOR {exceeds[method][scenario]['for']} and for the whole claim "
                     f"{exceeds[method][scenario]['claim']}")
     run.save_json({
-        "epsilon": eps, "delta": delta, "delta_benign": part, "pi_max": pi_max, "grid_size": c["grid_size"],
+        "epsilon": eps, "delta": delta, "delta_benign": part, "pi_max": pi_max, **start, "grid_size": c["grid_size"],
         "calibration_size": s["calibration_size"], "prevalence": s["prevalence"], "benign": s["benign"],
         "families": s["families"], "windows": windows, "window_sizes": sizes,
         "main_window_size": dep["main_window_size"], "scenarios": list(paths),
