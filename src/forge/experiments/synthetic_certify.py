@@ -25,10 +25,10 @@ from matplotlib.ticker import NullFormatter
 from scipy.stats import beta
 
 from forge import runs
-from forge.certify.bounds import clopper_pearson_lower, clopper_pearson_upper
 from forge.certify.certificate import certify, fixed_sequence, for_from_rates, ltt_iid
 from forge.data.synthetic import beta_cdfs, draw_counts
-from forge.viz import style
+from forge.eval.metrics import share_with_interval
+from forge.viz import layout, style
 from forge.viz.export import save_figure
 
 METHODS = ["forge_simplex", "forge_pooled", "ltt_iid", "forge_strict"]
@@ -92,12 +92,6 @@ def certify_draws(method: str, d, c: dict) -> dict:
         out = ltt_iid(d.benign_below, pooled_below[:, 0], c["epsilon"], c["delta"])
         return {**out, "floor": np.full(out["index"].shape, np.nan)}
     raise ValueError(f"unknown method {method}")
-
-
-def share_with_interval(count: int, total: int, prefix: str = "") -> dict:
-    # share of draws with a two sided 95% Clopper-Pearson interval
-    return {f"{prefix}rate": count / total, f"{prefix}low": clopper_pearson_lower(count, total, 0.025),
-            f"{prefix}high": clopper_pearson_upper(count, total, 0.025)}
 
 
 def run(cfg: dict, run: runs.Run) -> None:
@@ -196,33 +190,12 @@ def run(cfg: dict, run: runs.Run) -> None:
         run.log(f"saved figure {name}")
 
 
-def _dodge(x, k: int, n: int, step: float = 0.045) -> np.ndarray:
-    # shifts the points of the k-th of n methods sideways on a log axis, so markers and intervals do not hide each other
-    return np.asarray(x, dtype=float) * 10.0 ** ((k - (n - 1) / 2) * step)
+def _dodge(x, k: int, n: int) -> np.ndarray:
+    return layout.dodge(x, k, n, 0.045, log=True)
 
 
 def _points(ax, x, rate, low, high, method: str) -> None:
-    rate, low, high = (np.asarray(v, dtype=float) for v in (rate, low, high))
-    ax.errorbar(x, rate, yerr=[np.clip(rate - low, 0, None), np.clip(high - rate, 0, None)],
-                color=style.color_for(method, METHODS), marker=MARKERS[method], markersize=3.5, linewidth=1.2,
-                elinewidth=0.8, capsize=0, label=LABELS[method])
-
-
-def _panel_letter(ax, letter: str) -> None:
-    # above the top left corner of the plot, clear of the data
-    ax.text(0, 1.03, f"({letter})", transform=ax.transAxes, ha="left", va="bottom")
-
-
-def _legend_below(fig, ax, methods: list[str], extra=(), ncol: int = 3) -> None:
-    # methods first, then the reference lines. matplotlib fills legend columns first, so the entries are rearranged to
-    # read row by row
-    found = dict(zip(*reversed(ax.get_legend_handles_labels())))
-    entries = [(found[LABELS[m]], LABELS[m]) for m in methods]
-    entries += [(h, label) for label, h in found.items() if label not in {LABELS[m] for m in methods}] + list(extra)
-    rows = -(-len(entries) // ncol)
-    order = [r * ncol + c for c in range(ncol) for r in range(rows) if r * ncol + c < len(entries)]
-    fig.tight_layout()
-    fig.legend(*zip(*[entries[i] for i in order]), loc="upper center", ncol=ncol, bbox_to_anchor=(0.5, 0.0))
+    layout.points(ax, x, rate, low, high, color=style.color_for(method), marker=MARKERS[method], label=LABELS[method])
 
 
 def fig_violation_by_prevalence(run_dir) -> plt.Figure:
@@ -245,10 +218,10 @@ def fig_violation_by_prevalence(run_dir) -> plt.Figure:
         ax.xaxis.set_major_formatter(style.percent)
         ax.xaxis.set_minor_formatter(NullFormatter())
         ax.set_xlabel("attack prevalence in deployment")
-        _panel_letter(ax, letter)
+        layout.panel_letter(ax, letter)
     axes[0].set_ylim(-0.02, 1.02)
     axes[0].set_ylabel(r"share of draws with FOR > $\varepsilon$")
-    _legend_below(fig, axes[0], methods)
+    layout.legend_below(fig, axes[0], [LABELS[m] for m in methods])
     return fig
 
 
@@ -266,13 +239,13 @@ def fig_violation_and_dismiss_by_size(run_dir) -> plt.Figure:
         x = _dodge(g["size"], k, len(methods))
         _points(axes[0], x, g["joint_rate"], g["joint_low"], g["joint_high"], method)
         _points(axes[1], x, g["c1_rate"], g["c1_low"], g["c1_high"], method)
-        axes[2].plot(x, g["benign_rate_mean"], color=style.color_for(method, METHODS), marker=MARKERS[method],
+        axes[2].plot(x, g["benign_rate_mean"], color=style.color_for(method), marker=MARKERS[method],
                      markersize=3.5, linewidth=1.2, label=LABELS[method])
     for ax in axes[:2]:
         ax.axhline(delta, color=style.GRAY, linestyle="--", linewidth=1, label=r"$\delta$")
     # the best grid threshold of each claim, dotted in the color of the first method making that claim
     for claim, method in {CLAIMS[x]: x for x in reversed(methods)}.items():
-        axes[2].axhline(summary["oracle_benign_rate"][claim], color=style.color_for(method, METHODS), linestyle=":",
+        axes[2].axhline(summary["oracle_benign_rate"][claim], color=style.color_for(method), linestyle=":",
                         linewidth=1)
     axes[0].set_ylim(0, max(2 * delta, 1.15 * claims["joint_high"].max()))
     axes[0].set_ylabel("draws violating own claim")
@@ -284,9 +257,9 @@ def fig_violation_and_dismiss_by_size(run_dir) -> plt.Figure:
     for ax, letter in zip(axes, "abc"):
         ax.set_xscale("log")
         ax.set_xlabel("flows in the calibration set")
-        _panel_letter(ax, letter)
-    _legend_below(fig, axes[0], methods, [(Line2D([], [], color=style.GRAY, linestyle=":", linewidth=1),
-                                           "best grid threshold")])
+        layout.panel_letter(ax, letter)
+    layout.legend_below(fig, axes[0], [LABELS[m] for m in methods],
+                        [(Line2D([], [], color=style.GRAY, linestyle=":", linewidth=1), "best grid threshold")])
     return fig
 
 

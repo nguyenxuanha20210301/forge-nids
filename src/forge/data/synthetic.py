@@ -55,6 +55,18 @@ def draw_counts(rng, n: int, prevalence: float, shares, benign_cdf, family_cdf, 
     return Counts(sizes[:, 0], sizes[:, 1:], benign_below, family_below)
 
 
+def benign_path(start, end, windows: int, shift_at: int | None = None) -> np.ndarray:
+    # beta parameters of the benign class in windows 0 to windows. window 0 lies before deployment and keeps start, the
+    # deployment windows move to end in equal steps, or in one jump at window shift_at
+    if shift_at is not None and not 1 <= shift_at <= windows:
+        raise ValueError(f"shift_at is {shift_at}, expected a window from 1 to {windows}")
+    start = np.asarray(start, dtype=float)
+    end = np.asarray(end, dtype=float)
+    w = np.arange(windows + 1)
+    u = w / windows if shift_at is None else (w >= shift_at).astype(float)
+    return start + u[:, None] * (end - start)
+
+
 def sample_flows(rng, n: int, prevalence: float, shares, benign, families):
     # n flows with their scores, labels and family index, the index is -1 for benign flows
     p = np.concatenate([[1 - prevalence], prevalence * np.asarray(shares, dtype=float)])

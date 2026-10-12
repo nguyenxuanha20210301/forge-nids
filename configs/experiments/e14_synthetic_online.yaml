@@ -1,0 +1,48 @@
+# Theorem 1b on synthetic deployment windows whose benign scores drift, how often a certified threshold exceeds epsilon
+# in a window
+inherit: [../base.yaml]
+
+experiment:
+  name: e14_synthetic_online
+  module: synthetic_online
+
+certify:
+  epsilon: 0.001
+  delta: 0.05
+  # share of delta for the benign bound offline and for the bound on the window's dismissed share online, the rest
+  # goes to the miss rate bound of each attack family
+  delta_benign: 0.025
+  pi_max: 0.1
+  # thresholds at the benign quantiles of the calibration set, j / (grid_size + 1)
+  grid_size: 200
+
+synthetic:
+  # the calibration set of e10 at its main size
+  benign: {a: 2, b: 8}
+  families:
+    - {name: f1, a: 4, b: 3, share: 0.1}
+    - {name: f2, a: 5, b: 2.5, share: 0.2}
+    - {name: f3, a: 6, b: 2, share: 0.3}
+    - {name: f4, a: 8, b: 2, share: 0.4}
+  prevalence: 0.02
+  calibration_size: 30000000
+
+deployment:
+  windows: 20
+  # flows in each window
+  window_sizes: [100000, 1000000, 10000000]
+  main_window_size: 1000000
+  # the benign beta distribution of the last window, reached in equal steps, or in one jump at window shift_at
+  scenarios:
+    - {name: stable, end: {a: 2, b: 8}}
+    - {name: gradual, end: {a: 2, b: 5}}
+    - {name: abrupt, end: {a: 2, b: 5}, shift_at: 11}
+  # attack prevalence and family shares in every window. worst puts all attacks in the family with the heaviest low
+  # tail at pi_max, where the claims are tight, typical keeps the composition of the calibration set
+  compositions:
+    - {name: worst, prevalence: 0.1, shares: [1, 0, 0, 0]}
+    - {name: typical, prevalence: 0.02, shares: [0.1, 0.2, 0.3, 0.4]}
+
+simulation:
+  methods: [forge_simplex, forge_online, forge_previous]
+  draws: 10000

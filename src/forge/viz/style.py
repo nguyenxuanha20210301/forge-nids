@@ -14,6 +14,9 @@ DASHES = ["-", "--", "-.", ":", (0, (5, 1, 1, 1)), (0, (1, 1))]
 # step keeps a contrast above 2 against white, which keeps a small value apart from an empty cell
 SEQUENTIAL = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
 
+# every method of the project in one fixed order, which gives each method the same color in every experiment
+METHOD_ORDER = ("forge_simplex", "forge_pooled", "ltt_iid", "forge_strict", "forge_online", "forge_previous")
+
 # single column and double column widths in inches, close to most Elsevier and IEEE templates
 WIDTH_SINGLE = 3.5
 WIDTH_DOUBLE = 7.16
@@ -49,9 +52,8 @@ def use() -> None:
     mpl.rcParams.update(RC)
 
 
-def color_for(name: str, order: list[str]) -> str:
-    # order is the fixed list of method names for the experiment
-    return COLORS[order.index(name) % len(COLORS)]
+def color_for(name: str) -> str:
+    return COLORS[METHOD_ORDER.index(name) % len(COLORS)]
 
 
 def percent(v, _pos=None) -> str:

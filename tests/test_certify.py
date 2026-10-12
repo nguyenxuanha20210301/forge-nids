@@ -3,9 +3,9 @@ import pytest
 from scipy.stats import beta, binom, binomtest
 
 from forge.certify.bounds import clopper_pearson_lower, clopper_pearson_upper, dkw_margin
-from forge.certify.certificate import (certify, certify_scores, counts_below, fixed_sequence, for_from_rates,
-                                       ltt_iid)
-from forge.data.synthetic import beta_cdfs, draw_counts, sample_flows
+from forge.certify.certificate import (certify, certify_online, certify_online_scores, certify_scores, counts_below,
+                                       fixed_sequence, for_from_dismissed, for_from_rates, ltt_iid)
+from forge.data.synthetic import benign_path, beta_cdfs, draw_counts, sample_flows
 
 BENIGN = (2, 8)
 FAMILIES = [(4, 3), (5, 2.5), (6, 2), (8, 2)]
@@ -110,6 +110,60 @@ def test_certify_rejects_a_benign_share_outside_delta(delta_benign):
         certify(**hand_counts([0, 0, 0, 0, 0]), eps=1e-3, delta=0.05, pi_max=0.1, delta_benign=delta_benign)
 
 
+def test_for_from_dismissed_agrees_with_the_rates_and_stops_at_one():
+    pi, m, b = 0.1, np.array([0.0, 0.001, 0.02]), np.full(3, 0.3)
+    assert np.allclose(for_from_dismissed(pi, m, pi * m + (1 - pi) * b), for_from_rates(pi, m, b))
+    # bounds put in for m and d can give more than 1, and nothing dismissed gives 1 as well
+    assert for_from_dismissed(0.1, 0.5, 0.01) == 1.0
+    assert for_from_dismissed(0.1, 0.001, 0.0) == 1.0
+
+
+def window_counts():
+    # 10^6 unlabeled window flows, shares 0.1, 0.2, 0.3, 0.6 and 0.9 at the thresholds, and two attack families of D_cal
+    return dict(window_below=np.array([1, 2, 3, 6, 9]) * 100000, n_window=1000000,
+                attack_below=np.array([[0, 1, 2, 3, 9], [0, 0, 0, 5, 30]]), n_attack=np.array([20000, 8000]))
+
+
+def test_online_bound_takes_the_window_share_and_the_whole_delta_m():
+    counts = window_counts()
+    out = certify_online(**counts, eps=1e-3, delta=0.04, pi_max=0.2, delta_window=0.01)
+    # the fifth threshold fails, the second family has 30 misses there
+    j = int(out["index"])
+    assert j == 3
+    m = max(clopper_pearson_upper(counts["attack_below"][k, j], counts["n_attack"][k], 0.03) for k in range(2))
+    d = counts["window_below"][j] / counts["n_window"] - dkw_margin(counts["n_window"], 0.01)
+    # the window's dismissed share stands alone in the denominator, attacks included
+    assert out["bound"] == pytest.approx(0.2 * m / d, rel=1e-12)
+    assert out["floor"] == pytest.approx(d, rel=1e-12)
+
+
+def test_online_certificate_stops_at_the_first_failure_and_skips_impossible_starts():
+    window_below, n_window = np.array([1, 2, 3, 6, 9]) * 100000, 1000000
+    out = certify_online(window_below, n_window, np.array([[0, 0, 30, 30, 30]]), np.array([10000]), eps=1e-3,
+                         delta=0.05, pi_max=0.1)
+    # the fourth threshold passes on its own, but the third fails first
+    assert out["index"] == 1
+    # with 1000 attacks the bound is at least 0.1 times 3.7e-3 over the window share, too much up to a share of 0.3
+    few = dict(window_below=window_below, n_window=n_window, attack_below=np.array([[0, 0, 0, 0, 9]]),
+               n_attack=np.array([1000]))
+    assert certify_online(**few, eps=1e-3, delta=0.05, pi_max=0.1, start="strictest")["index"] == -1
+    assert certify_online(**few, eps=1e-3, delta=0.05, pi_max=0.1)["index"] == 3
+
+
+@pytest.mark.parametrize("delta_window", [0.0, 0.05, 0.08])
+def test_certify_online_rejects_a_window_share_outside_delta(delta_window):
+    with pytest.raises(ValueError):
+        certify_online(**window_counts(), eps=1e-3, delta=0.05, pi_max=0.1, delta_window=delta_window)
+
+
+def test_threshold_within_the_dkw_margin_never_passes():
+    # with 1000 benign flows the margin is 0.043, so at the first threshold, which holds 1% of them, no benign share is
+    # certain, and the bound must stay at 1 there whatever the attacks do
+    out = certify(np.array([10, 500, 900]), 1000, np.array([[0, 0, 0]]), np.array([100000]), eps=1e-3, delta=0.05,
+                  pi_max=0.1, start="strictest")
+    assert out["index"] == -1
+
+
 def test_counts_below_counts_ties_as_dismissed():
     rng = np.random.default_rng(8)
     scores = rng.integers(0, 20, 500) / 10
@@ -144,6 +198,24 @@ def test_certificate_ignores_increasing_transforms_of_the_scores():
         assert (moved["index"], moved["bound"], moved["floor"]) == (plain["index"], plain["bound"], plain["floor"])
 
 
+def test_online_certificate_ignores_increasing_transforms_of_the_scores():
+    rng = np.random.default_rng(11)
+    window, _, _ = sample_flows(rng, 400000, 0.05, SHARES, (2, 6), FAMILIES)
+    cal, labels, family = sample_flows(rng, 400000, 0.05, SHARES, BENIGN, FAMILIES)
+    attack = labels == 1
+    grid = np.quantile(cal[~attack], np.arange(1, 101) / 101)
+
+    def run(f):
+        return certify_online_scores(f(window), f(cal[attack]), family[attack], f(grid), eps=5e-3, delta=0.05,
+                                     pi_max=0.1)
+
+    plain = run(lambda s: s)
+    assert plain["index"] >= 0
+    for f in [lambda s: np.log(s / (1 - s)), lambda s: np.exp(8 * s) - 3, lambda s: s ** 5]:
+        moved = run(f)
+        assert (moved["index"], moved["bound"], moved["floor"]) == (plain["index"], plain["bound"], plain["floor"])
+
+
 def test_closed_form_matches_a_large_sample():
     rng = np.random.default_rng(4)
     pi, t = 0.2, 0.3
@@ -153,6 +225,14 @@ def test_closed_form_matches_a_large_sample():
     dismissed = scores <= t
     seen = labels[dismissed].mean()
     assert abs(seen - truth) < 4 * np.sqrt(truth * (1 - truth) / dismissed.sum())
+
+
+def test_benign_path_moves_in_steps_or_jumps_once():
+    steps = benign_path((2, 8), (2, 5), 4)
+    assert np.allclose(steps[:, 0], 2) and np.allclose(steps[:, 1], [8, 7.25, 6.5, 5.75, 5])
+    assert np.allclose(benign_path((2, 8), (2, 5), 4, shift_at=3)[:, 1], [8, 8, 8, 5, 5])
+    with pytest.raises(ValueError):
+        benign_path((2, 8), (2, 5), 4, shift_at=5)
 
 
 def test_draw_counts_follow_the_cdfs():
@@ -203,3 +283,32 @@ def test_violations_stay_below_delta_with_one_family_and_pi_max_at_calibration()
     shares = violation_shares(2000000, 0.1, [(4, 3)], [1.0], 0.1, draws=1500, seed=7)
     assert shares["forge_refused"] < 0.1
     assert shares["forge"] <= 0.05
+
+
+def online_violation_shares(window_benign, draws, seed):
+    # share of draws whose online and offline certificates exceed epsilon in one window of 10^6 flows at pi_max with
+    # all attacks from the family with the heaviest low tail, once the benign scores have moved to window_benign
+    eps, delta, pi_max = 1e-3, 0.05, 0.1
+    grid = beta.ppf(np.arange(1, 201) / 201, *BENIGN)
+    b, m = beta_cdfs(grid, BENIGN, FAMILIES)
+    b_w, _ = beta_cdfs(grid, window_benign, FAMILIES)
+    rng = np.random.default_rng(seed)
+    cal = draw_counts(rng, 30000000, 0.02, SHARES, b, m, draws)
+    win = draw_counts(rng, 1000000, pi_max, [1, 0, 0, 0], b_w, m, draws)
+    online = certify_online(win.benign_below + win.family_below.sum(1), 1000000, cal.family_below, cal.n_family, eps,
+                            delta, pi_max)["index"]
+    offline = certify(cal.benign_below, cal.n_benign, cal.family_below, cal.n_family, eps, delta, pi_max)["index"]
+    rate = for_from_rates(pi_max, m[0], b_w)
+
+    def share(index):
+        return np.mean(np.where(index >= 0, rate[np.maximum(index, 0)], 0.0) > eps)
+
+    return {"online": share(online), "online_refused": np.mean(online < 0), "offline": share(offline)}
+
+
+def test_online_violations_stay_below_delta_when_the_benign_scores_drift():
+    shares = online_violation_shares((2, 5), draws=1500, seed=10)
+    assert shares["online_refused"] < 0.5
+    assert shares["online"] <= 0.05
+    # the same windows catch the offline certificate, whose benign bound no longer holds
+    assert shares["offline"] > 0.5
