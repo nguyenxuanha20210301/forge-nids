@@ -183,5 +183,5 @@ def anoshift_source(tmp_path, monkeypatch):
     monkeypatch.setenv("FORGE_STORAGE", str(storage))
     cfg = load_config(configs_dir() / "data" / "anoshift.yaml")
     tar, expected, frames = write_anoshift_tar(tmp_path / "source", ANOSHIFT_YEARS)
-    return SimpleNamespace(cfg=cfg, tar=tar, url=tar.as_uri(), tar_bytes=tar.stat().st_size, expected=expected,
-                           frames=frames)
+    return SimpleNamespace(cfg=cfg, tar=tar, url=tar.as_uri(), tar_bytes=tar.stat().st_size,
+                           tar_sha256=hashlib.sha256(tar.read_bytes()).hexdigest(), expected=expected, frames=frames)

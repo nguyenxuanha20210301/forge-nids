@@ -13,9 +13,15 @@ def quiet(message):
     pass
 
 
-def download(src, expected=None, tar_bytes=None):
+def download(src, expected=None, tar_bytes=None, tar_sha256=None):
     return anoshift.download(src.cfg, log=quiet, expected=src.expected if expected is None else expected, url=src.url,
-                             tar_bytes=src.tar_bytes if tar_bytes is None else tar_bytes)
+                             tar_bytes=src.tar_bytes if tar_bytes is None else tar_bytes,
+                             tar_sha256=src.tar_sha256 if tar_sha256 is None else tar_sha256)
+
+
+def prepare(src, expected=None):
+    return anoshift.prepare(src.cfg, log=quiet, expected=src.expected if expected is None else expected,
+                            tar_sha256=src.tar_sha256)
 
 
 def truth(src):
@@ -38,7 +44,8 @@ def test_download_keeps_the_test_files_and_hashes_the_whole_tar(anoshift_source,
         kept = record["members"][anoshift.member_name(year)]
         assert kept["sha256"] == hashlib.sha256((folder / anoshift.file_name(year)).read_bytes()).hexdigest()
     # checked copies are found again, so the address is not opened a second time
-    anoshift.download(anoshift_source.cfg, log=quiet, expected=expected, url="file:///nowhere", tar_bytes=0)
+    anoshift.download(anoshift_source.cfg, log=quiet, expected=expected, url="file:///nowhere", tar_bytes=0,
+                      tar_sha256="0" * 64)
 
 
 def test_download_hashes_bytes_after_the_end_of_the_archive(anoshift_source, monkeypatch):
@@ -48,7 +55,7 @@ def test_download_hashes_bytes_after_the_end_of_the_archive(anoshift_source, mon
     with open(anoshift_source.tar, "ab") as f:
         f.write(b"trailing bytes after the archive" * 100)
     data = anoshift_source.tar.read_bytes()
-    folder = download(anoshift_source, tar_bytes=len(data))
+    folder = download(anoshift_source, tar_bytes=len(data), tar_sha256=hashlib.sha256(data).hexdigest())
     record = json.loads((folder / anoshift.SOURCE_FILE).read_text())
     assert record["bytes"] == len(data) and record["sha256"] == hashlib.sha256(data).hexdigest()
 
@@ -63,10 +70,20 @@ def test_download_rejects_a_tar_or_a_member_of_another_size(anoshift_source):
         download(anoshift_source, expected=wrong)
 
 
+def test_download_and_prepare_stop_on_a_tar_other_than_the_pinned_one(anoshift_source):
+    with pytest.raises(ValueError, match="first download"):
+        download(anoshift_source, tar_sha256="0" * 64)
+    assert not (anoshift.raw_dir(anoshift_source.cfg) / anoshift.SOURCE_FILE).exists()
+    download(anoshift_source)
+    with pytest.raises(ValueError, match="first download"):
+        anoshift.prepare(anoshift_source.cfg, log=quiet, expected=anoshift_source.expected, tar_sha256="0" * 64)
+    assert anoshift.TAR_SHA256 == "a12485e086ed657509e85dd100c28c5b2b287054b431c9105622a49709ca2920"
+
+
 def test_prepare_sorts_each_year_and_parses_every_column(anoshift_source):
     download(anoshift_source)
     cfg = anoshift_source.cfg
-    anoshift.prepare(cfg, log=quiet, expected=anoshift_source.expected)
+    prepare(anoshift_source)
     flows, rows = anoshift.load(cfg), truth(anoshift_source)
     assert flows["year"].tolist() == rows["year"].tolist()
     assert flows["order"].tolist() == rows["order"].tolist()
@@ -87,7 +104,7 @@ def test_prepare_sorts_each_year_and_parses_every_column(anoshift_source):
     readme = (anoshift.processed_dir(cfg) / "readme.md").read_text()
     assert "## Years" in readme and manifest["fingerprint"] in readme
     with pytest.raises(FileExistsError):
-        anoshift.prepare(cfg, log=quiet, expected=anoshift_source.expected)
+        prepare(anoshift_source)
 
 
 def test_prepare_stops_on_counts_other_than_the_published_ones(anoshift_source):
@@ -95,7 +112,7 @@ def test_prepare_stops_on_counts_other_than_the_published_ones(anoshift_source):
     wrong = {**anoshift_source.expected}
     wrong[2011] = {**wrong[2011], "unknown": wrong[2011]["unknown"] + 1}
     with pytest.raises(ValueError, match="2011_full_valid"):
-        anoshift.prepare(anoshift_source.cfg, log=quiet, expected=wrong)
+        prepare(anoshift_source, expected=wrong)
     assert not anoshift.processed_dir(anoshift_source.cfg).exists()
 
 
@@ -106,7 +123,7 @@ def test_prepare_stops_when_a_raw_file_changed(anoshift_source):
     data[100] ^= 1
     path.write_bytes(bytes(data))
     with pytest.raises(ValueError):
-        anoshift.prepare(anoshift_source.cfg, log=quiet, expected=anoshift_source.expected)
+        prepare(anoshift_source)
 
 
 def test_parsers_take_the_published_formats_and_stop_on_others():

@@ -13,8 +13,8 @@ def test_e03_tables_and_figures(anoshift_source, tmp_path):
     cfg = load_config(configs_dir() / "experiments" / "e03_anoshift.yaml", ["dataset.blocks_per_year=4"])
     quiet = lambda m: None  # noqa: E731
     anoshift.download(cfg, log=quiet, expected=anoshift_source.expected, url=anoshift_source.url,
-                      tar_bytes=anoshift_source.tar_bytes)
-    anoshift.prepare(cfg, log=quiet, expected=anoshift_source.expected)
+                      tar_bytes=anoshift_source.tar_bytes, tar_sha256=anoshift_source.tar_sha256)
+    anoshift.prepare(cfg, log=quiet, expected=anoshift_source.expected, tar_sha256=anoshift_source.tar_sha256)
     run = Run(cfg, root=tmp_path / "runs")
     module = experiments.get("anoshift_overview")
     module.run(cfg, run)

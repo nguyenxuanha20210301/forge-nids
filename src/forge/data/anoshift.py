@@ -9,8 +9,9 @@ the two byte counts in log bins, and the label in column 18, but no time stamp, 
 year runs from 0 through its train and test file in the order of the daily source files, so sorting the test file by
 it gives a 10% sample of every class in the original order of the year, without clock time.
 
-download streams the tar once, hashes all of it and keeps only the ten test files, each hashed as well, since no hash
-is published. prepare checks those hashes again, parses the columns into numbers and categories, sorts each year by
+download streams the tar once, hashes all of it and keeps only the ten test files, each hashed as well. no hash is
+published with the tar, so the one of the first download, on 2026-10-12, is pinned below and a later download of a
+changed tar stops. prepare checks those hashes again, parses the columns into numbers and categories, sorts each year by
 the row index, checks every year against the row and label counts read from the published files on 2026-10-13, and
 writes one parquet file inside a versioned folder with a readme and a manifest that record the source, the hashes,
 the counts and a content fingerprint.
@@ -50,6 +51,8 @@ URL = "https://storage.googleapis.com/bitdefender_ml_artifacts/anoshift/Kyoto-20
 # size and last modified time of the tar as Google storage reported them on 2026-10-12
 TAR_BYTES = 8099829760
 TAR_MODIFIED = "Mon, 11 May 2026 14:23:05 GMT"
+# sha256 of the whole tar from the first download, on Colab on 2026-10-12, nothing published to check it against
+TAR_SHA256 = "a12485e086ed657509e85dd100c28c5b2b287054b431c9105622a49709ca2920"
 SOURCE_FILE = "source.json"
 
 # member size in the tar headers, and rows and label counts read from each test file through its footer and label
@@ -173,7 +176,8 @@ class _Hashing(io.RawIOBase):
         return n
 
 
-def download(cfg: dict, log=print, expected: dict | None = None, url: str = URL, tar_bytes: int = TAR_BYTES) -> Path:
+def download(cfg: dict, log=print, expected: dict | None = None, url: str = URL, tar_bytes: int = TAR_BYTES,
+             tar_sha256: str | None = TAR_SHA256) -> Path:
     # a test file gets its final name only once complete, and source.json is written only after the whole tar has
     # passed through the hash, so a raw folder with source.json holds checked copies
     expected = EXPECTED if expected is None else expected
@@ -217,6 +221,8 @@ def download(cfg: dict, log=print, expected: dict | None = None, url: str = URL,
         raise ValueError(f"the tar holds no {', '.join(missing)}")
     if stream.n != tar_bytes:
         raise ValueError(f"the tar arrived with {stream.n} bytes where {tar_bytes} were reported")
+    if tar_sha256 is not None and stream.h.hexdigest() != tar_sha256:
+        raise ValueError(f"the tar arrived with sha256 {stream.h.hexdigest()}, the first download gave {tar_sha256}")
     record = {
         "url": url,
         "bytes": stream.n,
@@ -230,11 +236,13 @@ def download(cfg: dict, log=print, expected: dict | None = None, url: str = URL,
     return folder
 
 
-def verify_raw(folder: Path, expected: dict, log=print) -> dict:
+def verify_raw(folder: Path, expected: dict, log=print, tar_sha256: str | None = TAR_SHA256) -> dict:
     source = folder / SOURCE_FILE
     if not source.exists():
         raise FileNotFoundError(f"{source} is missing, download writes it after hashing the tar")
     record = json.loads(source.read_text(encoding="utf-8"))
+    if tar_sha256 is not None and record["sha256"] != tar_sha256:
+        raise ValueError(f"{source} records a tar with sha256 {record['sha256']}, the first download gave {tar_sha256}")
     for year, e in expected.items():
         path = folder / file_name(year)
         kept = record["members"].get(member_name(year))
@@ -330,7 +338,7 @@ def _summary(flows: pd.DataFrame, year: int) -> dict:
     }
 
 
-def prepare(cfg: dict, log=print, expected: dict | None = None) -> Path:
+def prepare(cfg: dict, log=print, expected: dict | None = None, tar_sha256: str | None = TAR_SHA256) -> Path:
     expected = EXPECTED if expected is None else expected
     d = cfg["dataset"]
     version = d["processed_version"]
@@ -340,7 +348,7 @@ def prepare(cfg: dict, log=print, expected: dict | None = None) -> Path:
     if out.exists():
         raise FileExistsError(f"{out} exists and a processed version is never overwritten, name a new version")
     source = raw_dir(cfg)
-    record = verify_raw(source, expected, log)
+    record = verify_raw(source, expected, log, tar_sha256)
 
     # a version folder appears under its final name only once complete, a partial one is left by an interrupted run
     partial = out.with_name(f"{out.name}.partial")
@@ -432,7 +440,8 @@ def readme(m: dict) -> str:
         "",
         f"The data is one tar, {tar['url']}, {tar['bytes']} bytes, last modified {tar['last_modified']}, sha256 "
         f"`{tar['sha256']}`, downloaded {tar['downloaded_utc']}. No hash is published with it, so the sha256 is the "
-        "one computed while the tar was streamed. Only the test file of each year is kept.",
+        "one computed while the tar was streamed, and the one of the first download is pinned in "
+        "`forge.data.anoshift`. Only the test file of each year is kept.",
         "",
         "| member | bytes | sha256 |",
         "|---|---|---|",
