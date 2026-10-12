@@ -90,17 +90,24 @@ def test_feasible_start_skips_thresholds_that_cannot_pass():
         certify(**counts, eps=1e-3, delta=0.05, pi_max=0.1, start="loosest")
 
 
-def test_bound_takes_the_worst_family_at_delta_m_over_k():
+def test_bound_takes_the_worst_family_at_the_whole_delta_m():
     benign_below, n_benign = np.array([1, 2, 3, 6, 9]) * 100000, 1000000
     families = np.array([[0, 1, 2, 3, 9], [0, 0, 0, 5, 30]])
     n_families = np.array([20000, 8000])
     out = certify(benign_below, n_benign, families, n_families, eps=1e-3, delta=0.04, pi_max=0.2, delta_benign=0.01)
     j = int(out["index"])
     assert j >= 0
-    m = max(clopper_pearson_upper(families[k, j], n_families[k], 0.03 / 2) for k in range(2))
+    # only the family with the largest miss rate matters at the threshold that decides, so delta_m is not split
+    m = max(clopper_pearson_upper(families[k, j], n_families[k], 0.03) for k in range(2))
     b = benign_below[j] / n_benign - dkw_margin(n_benign, 0.01)
     assert out["bound"] == pytest.approx(for_from_rates(0.2, m, b), rel=1e-12)
     assert out["floor"] == pytest.approx(0.8 * b, rel=1e-12)
+
+
+@pytest.mark.parametrize("delta_benign", [0.0, 0.05, 0.08])
+def test_certify_rejects_a_benign_share_outside_delta(delta_benign):
+    with pytest.raises(ValueError):
+        certify(**hand_counts([0, 0, 0, 0, 0]), eps=1e-3, delta=0.05, pi_max=0.1, delta_benign=delta_benign)
 
 
 def test_counts_below_counts_ties_as_dismissed():

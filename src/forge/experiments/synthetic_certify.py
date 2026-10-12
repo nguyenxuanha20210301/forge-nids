@@ -247,7 +247,7 @@ def fig_violation_by_prevalence(run_dir) -> plt.Figure:
         ax.set_xlabel("attack prevalence in deployment")
         _panel_letter(ax, letter)
     axes[0].set_ylim(-0.02, 1.02)
-    axes[0].set_ylabel(r"share of draws with FOR $> \varepsilon$")
+    axes[0].set_ylabel(r"share of draws with FOR > $\varepsilon$")
     _legend_below(fig, axes[0], methods)
     return fig
 

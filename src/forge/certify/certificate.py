@@ -3,19 +3,21 @@
 a flow is dismissed when its score is at or below the threshold. at prevalence pi the false omission rate is
 pi m / (pi m + (1 - pi) b), with m the share of attacks dismissed and b the share of benign flows dismissed. it rises
 with pi and m and falls with b, so an upper bound on m and a lower bound on b, plugged in at pi_max, bound it for every
-pi up to pi_max. with one miss rate bound per attack family and the largest of them, the bound covers every family mix,
-at the price of splitting delta_m over the K families.
+pi up to pi_max. the miss rate of a family mix is the mix average of the family miss rates, so over all mixes the rate
+is largest for the single family with the largest miss rate, and the largest of the K family bounds covers every mix.
 
 both methods take counts of calibration flows at or below each threshold of a grid t_1 < ... < t_G, so they use the
 scores only through their order and give the same result after any increasing transform of the scores. thresholds are
 tested in order toward looser ones and the search stops at the first failure. the first threshold whose true rate
-exceeds epsilon then passes only if a bound fails at that one threshold, so no correction for the number of thresholds
-is needed.
+exceeds epsilon then passes only if one bound fails at that one threshold, the benign bound or the bound of the family
+with the largest true miss rate there. so no correction is needed for the number of thresholds, nor for the number of
+families, and every family bound takes all of delta_m. a set of mixes that caps the family shares has its worst mix
+spread over several families, and would need delta_m split over them.
 
 the sequence starts at the strictest threshold that could pass with no attack at or below it, not at t_1. with no
-misses the miss rate bound of a family is still about ln(K / delta_m) / n_k, so where b is small the bound stays far
+misses the miss rate bound of a family is still about ln(1 / delta_m) / n_k, so where b is small the bound stays far
 above epsilon whatever the attack scores are. with epsilon 1e-3, pi_max 0.1 and a grid of 200 benign quantiles, a
-sequence starting at t_1 stops at once unless every family has more than about 10^5 calibration attacks. the start
+sequence starting at t_1 stops at once unless every family has more than about 80,000 calibration attacks. the start
 depends on the benign counts, so the benign bound must hold for every threshold at once, which the one sided DKW bound
 does. given the benign scores and the family sizes the start is fixed and the attack scores are still independent
 draws, so the argument above holds as it is. the uniform benign bound also keeps the automation floor
@@ -62,8 +64,9 @@ def certify(benign_below, n_benign, attack_below, n_attack, eps, delta, pi_max, 
 
     benign_below has shape (..., G) and attack_below (..., K, G) with one row per attack family, n_benign has shape (...)
     and n_attack (..., K). leading axes are independent calibration sets. with K families the bound covers every family
-    mix, with the families summed into one row it covers only the mix of the calibration set. returns the index of the
-    certified threshold, -1 when none is certified, its FOR bound and the automation floor.
+    mix, with the families summed into one row it covers only the mix of the calibration set. delta_benign goes to the
+    benign bound and the rest of delta to each family bound. returns the index of the certified threshold, -1 when none
+    is certified, its FOR bound and the automation floor.
     """
     if start not in STARTS:
         raise ValueError(f"start is {start}, expected one of {', '.join(STARTS)}")
@@ -72,15 +75,17 @@ def certify(benign_below, n_benign, attack_below, n_attack, eps, delta, pi_max, 
     n_benign = np.asarray(n_benign)
     n_attack = np.asarray(n_attack)
     delta_benign = delta / 2 if delta_benign is None else delta_benign
-    delta_family = (delta - delta_benign) / n_attack.shape[-1]
+    if not 0 < delta_benign < delta:
+        raise ValueError(f"delta_benign needs 0 < delta_benign < delta, got {delta_benign} with delta {delta}")
+    delta_miss = delta - delta_benign
 
     share = np.divide(benign_below, n_benign[..., None], out=np.zeros(benign_below.shape),
                       where=n_benign[..., None] > 0)
     b_lower = np.clip(share - np.asarray(dkw_margin(n_benign, delta_benign))[..., None], 0, None)
-    m_upper = clopper_pearson_upper(attack_below, n_attack[..., None], delta_family).max(-2)
+    m_upper = clopper_pearson_upper(attack_below, n_attack[..., None], delta_miss).max(-2)
     bound = for_from_rates(pi_max, m_upper, b_lower)
     if start == "feasible":
-        m_zero = np.asarray(clopper_pearson_upper(np.zeros_like(n_attack), n_attack, delta_family)).max(-1)
+        m_zero = np.asarray(clopper_pearson_upper(np.zeros_like(n_attack), n_attack, delta_miss)).max(-1)
         first = first_index(for_from_rates(pi_max, m_zero[..., None], b_lower) <= eps)
     else:
         first = np.zeros(n_benign.shape, dtype=int)

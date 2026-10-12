@@ -8,7 +8,7 @@ experiment:
 certify:
   epsilon: 0.001
   delta: 0.05
-  # the rest of delta goes to the miss rate bounds, split over the attack families
+  # the rest of delta goes to the miss rate bound of each attack family, with no split over the families
   delta_benign: 0.025
   pi_max: 0.1
   # thresholds at the benign quantiles j / (grid_size + 1)
