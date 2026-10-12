@@ -6,8 +6,8 @@ The project is called `forge-nids` in all three places.
 
 | Place | Location | Holds | Used for |
 |---|---|---|---|
-| Local machine | `~/projects/forge-nids` | the git working copy, plus `drive/`, a local mirror of runs pulled from Drive | writing code, configs and notebooks, analysing downloaded results, committing and pushing |
-| GitHub | `<github-user>/forge-nids`, private | code, configs, notebooks, docs, small paper results | the single source of code for Colab |
+| Local machine | `~/projects/forge-nids` | the git working copy, `docs/` with the proposal and plan, and `drive/`, a local mirror of runs pulled from Drive | writing code, configs and notebooks, analysing downloaded results, committing and pushing |
+| GitHub | `<github-user>/forge-nids`, private | code, configs, notebooks, conventions, small paper results | the single source of code for Colab |
 | Google Drive | `MyDrive/forge-nids` | raw and processed data, every run folder, uploaded notebooks | everything Colab reads and writes |
 
 Colab is where computation happens. It never holds anything that matters after the session ends: the code is cloned fresh into `/content/forge-nids` and every output is written to Drive.

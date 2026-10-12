@@ -6,7 +6,7 @@ forge-nids/
 ├── pyproject.toml            package metadata and dependencies, installed with pip install -e .
 ├── .gitignore
 ├── conventions/              these rules
-├── docs/                     proposal.md, plan.md, notes that outlive a single run
+├── docs/                     proposal.md, plan.md, notes, local only, never committed
 ├── configs/
 │   ├── base.yaml             defaults every experiment inherits
 │   ├── data/                 one file per dataset, <dataset>.yaml

@@ -2,7 +2,6 @@
 
 FORGE, false omission rate guarantees under evolving traffic. An alert triage method for network intrusion detection that dismisses part of the traffic automatically, with a finite-sample bound on the share of attacks inside the dismissed part, valid under changes in attack prevalence and monitored after deployment through random audits and confidence sequences.
 
-- Research proposal, `docs/proposal.md`. Plan and research questions, `docs/plan.md`.
 - Working rules, `conventions/`. Start with `conventions/readme.md`.
 
 ## Quick start

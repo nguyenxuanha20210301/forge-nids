@@ -1,6 +1,9 @@
 # local mirror of the Drive project folder, data and runs live on Drive
 /drive/
 
+# proposal, plan and other notes stay on the local machine
+/docs/
+
 # python
 __pycache__/
 *.py[cod]

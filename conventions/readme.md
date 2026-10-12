@@ -17,7 +17,7 @@ These files are the working rules for forge-nids. When a rule here conflicts wit
 ## Hard rules
 
 1. Everything is in English: code, comments, prints, figures, docs, commit messages.
-2. Data and run outputs live on Drive. The repository holds code, configs, notebooks, docs and small paper results.
+2. Data and run outputs live on Drive. The repository holds code, configs, notebooks, conventions and small paper results. The proposal, the plan and other notes in `docs/` stay on the local machine and are never committed.
 3. The author runs every git command. Nothing else commits or pushes, and no commit carries a co-author or generated-by line.
 4. No machine-specific path, username, email or token appears in any committed file.
 5. All file and folder names are lowercase.

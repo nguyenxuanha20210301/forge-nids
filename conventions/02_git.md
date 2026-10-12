@@ -10,8 +10,9 @@ The author is the only person who runs `git commit` and `git push`, and the only
 |---|---|
 | `src/`, `scripts/`, `configs/`, `tests/`, `analysis/` | `drive/`, the local mirror of Drive |
 | `notebooks/`, with outputs cleared | data of any kind, raw or processed |
-| `conventions/`, `docs/`, `readme.md`, `pyproject.toml`, `.gitignore` | full run folders, model checkpoints |
+| `conventions/`, `readme.md`, `pyproject.toml`, `.gitignore` | full run folders, model checkpoints |
 | `results/`, small tables and final figures used in the paper | tokens, `.env` files, credentials |
+| | `docs/`, the proposal, plan and notes, kept locally |
 | | personal tool and assistant configuration files |
 
 Personal tool files are kept out through `.git/info/exclude`, which is local to the machine and never pushed, so the committed `.gitignore` does not name them either.
