@@ -269,6 +269,16 @@ def counts_below(scores, grid):
     return np.searchsorted(np.sort(np.asarray(scores)), grid, side="right")
 
 
+def grid_from(benign_scores, size: int, tail=()) -> np.ndarray:
+    # benign scores of the selection set at the levels j / (size + 1) and at the extra levels in tail, each the smallest
+    # score whose empirical cdf reaches the level, so every threshold is a score that occurs. ties among the scores
+    # merge some levels into one threshold, and a level beyond the last score falls on the last score
+    ordered = np.sort(benign_scores)
+    levels = np.r_[np.arange(1, size + 1) / (size + 1), np.asarray(tail, dtype=float)]
+    positions = np.clip(np.ceil(levels * len(ordered)).astype(int) - 1, 0, len(ordered) - 1)
+    return np.unique(ordered[positions])
+
+
 def _family_counts(attack_scores, families, grid):
     # every family present among the attack scores is one vertex of the mix simplex
     attack_scores = np.asarray(attack_scores)
