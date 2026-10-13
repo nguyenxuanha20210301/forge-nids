@@ -8,6 +8,7 @@ from forge.certify.certificate import (certify, certify_online, conformal_fnr, f
 from forge.config import load_config
 from forge.data import litnet2020, splits
 from forge.data.synthetic import draw_counts
+from forge.eval import windows as judge
 from forge.eval.metrics import auc
 from forge.paths import configs_dir
 from forge.runs import Run
@@ -120,6 +121,20 @@ def test_calibration_mix_caps_the_largest_families_and_the_claim_covers_merged_o
     assert litnet2020.port_range([0, 1, 1023, 1024, 49151, 49152, 65535]).tolist() == [0, 1, 1, 2, 2, 3, 3]
 
 
+def test_every_mix_threshold_covers_each_family_alone_and_merged_groups_at_their_mix():
+    # family 0 stands alone, families 1 and 2 form a group at proportions 1 to 3. family 1 alone is unsafe from the
+    # third threshold on, but in the group at its mix only from the fourth, while family 0 is unsafe at the last
+    m = np.array([[0.0, 0.0, 0.0, 0.0, 0.05], [0.0, 0.0, 0.02, 0.04, 0.04], [0.0, 0.0, 0.0, 0.0, 0.0]])
+    b = np.array([0.2, 0.4, 0.6, 0.8, 0.9])
+    groups, shares = np.array([0, 1, 1]), np.array([0.5, 0.125, 0.375])
+    kappa = 1e-3 * 0.9 / (0.999 * 0.1)
+    assert 0.02 / 0.6 / 4 < kappa < 0.04 / 0.8 / 4 and 0.02 / 0.6 > kappa
+    assert judge.every_mix_threshold(0.1, m, b, groups, shares, 1e-3) == 2
+    # with every family alone the second family stops the sequence one threshold earlier
+    assert judge.every_mix_threshold(0.1, m, b, np.arange(3), shares, 1e-3) == 1
+    assert judge.every_mix_threshold(0.1, np.ones((3, 5)), b, groups, shares, 1e-3) == -1
+
+
 def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
     cfg = load_config(configs_dir() / "experiments" / "e12_litnet_prevalence.yaml", OVERRIDES)
     run, module = run_e12(cfg, tmp_path / "runs")
@@ -204,7 +219,10 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
     pooled = certify(cal.benign_below, cal.n_benign, pooled_below[:, None], pooled_n[:, None], *args, **start)
     assert np.array_equal(saved["forge_simplex_index"], simplex["index"])
     assert np.array_equal(saved["forge_pooled_index"], pooled["index"])
-    assert np.array_equal(saved["ltt_iid_index"], ltt_iid(cal.benign_below, pooled_below, EPS, c["delta"])["index"])
+    # LTT starts by the rule of FORGE, the config sets ltt_guarded_start
+    assert c["ltt_guarded_start"]
+    ltt = ltt_iid(cal.benign_below, pooled_below, EPS, c["delta"], n=cal.n_benign + cal.n_family.sum(1), **start)
+    assert np.array_equal(saved["ltt_iid_index"], ltt["index"])
     assert np.array_equal(saved["conformal_fnr_index"], conformal_fnr(pooled_below, pooled_n, summary["beta"]))
     assert (saved["fixed_sel_index"] == fixed).all()
     # the merged group makes the simplex claim refuse in some draws, while the pooled one, which covers the calibration
@@ -260,6 +278,20 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
             best = safe[-1] if len(safe) else -1
             assert getattr(row, f"{name}_index") == best
             assert np.isclose(getattr(row, f"{name}_dismissed"), share[best] if best >= 0 else 0.0)
+        # the loosest threshold safe at pi_max for each family alone and each merged group at its calibration mix, on
+        # the distributions of the arm, which a real window lacks for the families of other captures
+        if row.arm == "real":
+            assert row.best_every_mix_index == -1 and np.isnan(row.best_every_mix_dismissed)
+        else:
+            groups = hist["groups"]
+            m_groups = [shares_cal[groups == g] @ m_family[groups == g] / shares_cal[groups == g].sum()
+                        for g in range(groups.max() + 1)]
+            safe = np.flatnonzero(np.all([for_from_rates(PI_MAX, mg, b) <= EPS for mg in m_groups], axis=0))
+            every = safe[-1] if len(safe) else -1
+            assert row.best_every_mix_index == every
+            assert np.isclose(row.best_every_mix_dismissed, share[every] if every >= 0 else 0.0)
+            # a threshold safe for every covered mix is safe for the mix of the window when the claim covers it
+            assert not row.in_claim or every <= row.best_up_to_pi_max_index
     assert claims["benign_subsampled"].any() and not claims.loc[claims["arm"] != "real", "benign_subsampled"].any()
     # windows of a pooled family lie outside the simplex claim at their own mix, every window lies inside at the
     # calibration mix
@@ -335,6 +367,8 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
             assert table.loc[key, "violation_window_max"] == g["rate"].max()
             assert np.isclose(table.loc[key, "dismissed_mean"], g["dismissed_mean"].mean())
             assert np.isclose(table.loc[key, "best_up_to_pi_max_dismissed"], g["best_up_to_pi_max_dismissed"].mean())
+            assert np.isclose(table.loc[key, "best_every_mix_dismissed"], g["best_every_mix_dismissed"].mean(),
+                              equal_nan=True)
             rates = np.concatenate([certified[key][i] for i in g["window"]])
             assert np.isclose(table.loc[key, "for_median"], np.median(rates), equal_nan=True) or not len(rates)
     covered = claims[(claims["prevalence"] <= PI_MAX) & claims["in_claim"]]
@@ -354,6 +388,16 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
             assert f"{method}, {module.ARM_LABELS[arm]} in the claim, window mix, FOR above epsilon in " in log
             assert (f"{method}, {module.ARM_LABELS[arm]} in the claim, calibration mix, FOR above epsilon in "
                     in log) == (arm != "real")
+    best = by_prevalence[(by_prevalence["subset"] == "in_claim") & (by_prevalence["arm"] == "reference")
+                         & (by_prevalence["mix"] == "window") & (by_prevalence["method"] == methods[0])
+                         & (by_prevalence["prevalence"] == dep["main_prevalence"])].iloc[0]
+    assert (f"best thresholds, reference windows in the claim, window mix, mean share of window flows dismissed by the "
+            f"loosest threshold with FOR at or below epsilon up to pi_max {best['best_up_to_pi_max_dismissed']:.4f} at "
+            f"prevalence {dep['main_prevalence']}, by the loosest safe for every mix the claim covers "
+            f"{best['best_every_mix_dismissed']:.4f} at prevalence {dep['main_prevalence']}, by the loosest at the "
+            "window's prevalence ") in log
+    assert "real windows in the claim, window mix, mean share of window flows dismissed by the loosest threshold " \
+           "with FOR at or below epsilon up to pi_max" in log and "covers" not in log.split("best thresholds, real")[1]
     g = main[(main["window"] == 1) & (main["arm"] == "real") & (main["mix"] == "window")]
     assert (f"Reaper worm, real window at prevalence {dep['main_prevalence']}, FOR above epsilon in "
             + ", ".join(f"{r.method} {r.rate:.4f}" for r in g.itertuples()) + ", outside the FORGE claim") in log
@@ -376,6 +420,11 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
             g = inside[(inside["arm"] == arm) & (inside["method"] == method)].sort_values("prevalence")
             assert np.array_equal(drawn(fig.axes[2], module.LABELS[method]), g["dismissed_mean"].to_numpy())
         assert fig.axes[2].get_ylabel() == "window flows dismissed"
+        # the yardstick for every covered mix where the arm has the distributions of every family
+        labels = [line.get_label() for line in fig.axes[2].get_lines()]
+        assert (module.EVERY_LINE[2] in labels) == (arm != "real")
+        if arm != "real":
+            assert np.array_equal(drawn(fig.axes[2], module.EVERY_LINE[2]), g["best_every_mix_dismissed"].to_numpy())
         plt.close(fig)
     # the figure over windows, a band behind each window outside the claim and the dismissed shares of the reference
     # windows in the last row

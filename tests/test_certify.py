@@ -299,17 +299,23 @@ def violation_shares(n, pi_cal, families, shares, pi_max, draws, seed):
 
     forge = certify(d.benign_below, d.n_benign, d.family_below, d.n_family, eps, delta, pi_max)["index"]
     ltt = ltt_iid(d.benign_below, d.family_below.sum(1), eps, delta)["index"]
-    safe = np.maximum(ltt, 0)
-    ltt_cal = np.where(ltt >= 0, for_from_rates(pi_cal, (np.array(shares) @ m)[safe], b[safe]), 0.0)
+    guarded = ltt_iid(d.benign_below, d.family_below.sum(1), eps, delta, n=d.n_benign + d.n_family.sum(1),
+                      start_misses=2, start_slack=0.05)["index"]
+
+    def at_calibration(index):
+        safe = np.maximum(index, 0)
+        return np.where(index >= 0, for_from_rates(pi_cal, (np.array(shares) @ m)[safe], b[safe]), 0.0)
+
     return {"forge": np.mean(worst(forge, pi_max) > eps), "forge_refused": np.mean(forge < 0),
-            "ltt_iid": np.mean(ltt_cal > eps), "ltt_at_pi_max": np.mean(worst(ltt, pi_max) > eps)}
+            "ltt_iid": np.mean(at_calibration(ltt) > eps), "ltt_guarded": np.mean(at_calibration(guarded) > eps),
+            "ltt_at_pi_max": np.mean(worst(ltt, pi_max) > eps)}
 
 
 def test_violations_stay_below_delta_and_the_check_can_fail():
     shares = violation_shares(30000000, 0.02, FAMILIES, SHARES, 0.1, draws=1500, seed=6)
     assert shares["forge_refused"] < 0.5
     assert shares["forge"] <= 0.05
-    assert shares["ltt_iid"] <= 0.05
+    assert shares["ltt_iid"] <= 0.05 and shares["ltt_guarded"] <= 0.05
     # the same simulation catches the i.i.d. baseline at a higher prevalence, so it is able to find a violation
     assert shares["ltt_at_pi_max"] > 0.5
 
@@ -409,3 +415,35 @@ def test_group_rows_sums_counts_and_sizes_within_groups():
     summed, sizes = group_rows(below, n, np.array([0, 1, 0]))
     assert summed.shape == (2, 2, 4) and sizes.tolist() == [[40, 20], [100, 50]]
     assert (summed[:, 0] == below[:, 0] + below[:, 2]).all() and (summed[:, 1] == below[:, 1]).all()
+
+
+def test_ltt_without_tolerated_attacks_starts_where_it_always_did():
+    # the first threshold that could pass with no attack, then the first failure, as before the start rule took misses
+    rng = np.random.default_rng(3)
+    benign = np.cumsum(rng.integers(0, 4000, (300, 40)), axis=1)
+    attack = np.cumsum(rng.binomial(1, 0.02, (300, 40)) * rng.integers(1, 4, (300, 40)), axis=1)
+    dismissed = benign + attack
+    first = np.where((clopper_pearson_upper(0, dismissed, 0.05) <= 1e-3).any(1),
+                     (clopper_pearson_upper(0, dismissed, 0.05) <= 1e-3).argmax(1), 40)
+    old = fixed_sequence(clopper_pearson_upper(attack, dismissed, 0.05) <= 1e-3, first)
+    assert np.array_equal(ltt_iid(benign, attack, 1e-3, 0.05)["index"], old)
+    assert np.array_equal(ltt_iid(benign, attack, 1e-3, 0.05, n=np.full(300, 10 ** 6), start_misses=0)["index"], old)
+    with pytest.raises(ValueError, match="needs the size n"):
+        ltt_iid(benign, attack, 1e-3, 0.05, start_misses=1)
+    with pytest.raises(ValueError, match="start_misses"):
+        ltt_iid(benign, attack, 1e-3, 0.05, n=np.full(300, 10 ** 6), start_misses=-1)
+
+
+def test_ltt_start_tolerates_one_attack_among_the_first_dismissed_flows():
+    # 4,525 flows dismissed at the first threshold with one attack among them, as for e12 on LITNET, end the plain
+    # sequence at its start, while the guarded one starts at the second threshold, which passes with that attack and
+    # dismisses 0.001 more of the 5 million flows, and walks on to the fourth
+    benign = np.array([4524, 9500, 20000, 40000, 60000])
+    attack = np.array([1, 1, 2, 4, 400])
+    n = 5_000_000
+    assert clopper_pearson_upper(1, 4525, 0.05) > 1e-3 >= clopper_pearson_upper(1, 9501, 0.05)
+    assert ltt_iid(benign, attack, 1e-3, 0.05)["index"] == -1
+    out = ltt_iid(benign, attack, 1e-3, 0.05, n=n, start_misses=2, start_slack=0.05)
+    assert out["index"] == 3 and out["bound"] == clopper_pearson_upper(4, 40004, 0.05)
+    # a slack below the extra 0.001 dismissed keeps the start, and the refusal
+    assert ltt_iid(benign, attack, 1e-3, 0.05, n=n, start_misses=2, start_slack=0.0005)["index"] == -1

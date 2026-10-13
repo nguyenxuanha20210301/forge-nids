@@ -90,7 +90,10 @@ def certify_draws(method: str, d, c: dict) -> dict:
     if method == "forge_pooled":
         return certify(d.benign_below, d.n_benign, pooled_below, pooled_n, *args, **start)
     if method == "ltt_iid":
-        out = ltt_iid(d.benign_below, pooled_below[:, 0], c["epsilon"], c["delta"])
+        # the start of FORGE for LTT too where the config asks for it, runs from before the switch start it at the
+        # first threshold that could pass with no attack
+        guarded = {"n": d.n_benign + d.n_family.sum(1), **start} if c.get("ltt_guarded_start", False) else {}
+        out = ltt_iid(d.benign_below, pooled_below[:, 0], c["epsilon"], c["delta"], **guarded)
         return {**out, "floor": np.full(out["index"].shape, np.nan)}
     raise ValueError(f"unknown method {method}")
 

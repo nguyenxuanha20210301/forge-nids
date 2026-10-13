@@ -64,6 +64,18 @@ def best_thresholds(pi, pi_max, m_w, b_w, eps) -> dict:
     return out
 
 
+def every_mix_threshold(pi_max, m_family, b, groups, shares, eps) -> int:
+    # the loosest grid threshold whose true FOR stays at or below epsilon at pi_max for every mix the simplex claim over
+    # the groups covers, each family that stands alone and each merged group at its calibration proportions, the best a
+    # method could dismiss that knows the distributions and must cover every mix. -1 when no threshold is safe
+    m_family, groups, shares = np.asarray(m_family), np.asarray(groups), np.asarray(shares, dtype=float)
+    weights = np.stack([np.where(groups == g, shares, 0.0) for g in np.unique(groups)])
+    total = weights.sum(1, keepdims=True)
+    m_group = np.divide(weights, total, out=np.zeros(weights.shape), where=total > 0) @ m_family
+    safe = np.flatnonzero((for_from_rates(pi_max, m_group, b) <= eps).all(0))
+    return int(safe[-1]) if len(safe) else -1
+
+
 def evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below, eps, values, cell) -> list[dict]:
     # one row per method for one window, prevalence and mix. the true rate and dismissed share follow from the cdfs of
     # the window's population at the grid, the realized share of attacks among the dismissed sessions from the drawn

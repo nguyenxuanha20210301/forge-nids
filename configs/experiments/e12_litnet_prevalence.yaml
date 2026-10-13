@@ -45,6 +45,10 @@ certify:
   # long as it dismisses at most start_slack more than the first threshold that would pass with no miss
   start_misses: 2
   start_slack: 0.05
+  # LTT starts its sequence by the same rule, with attacks among the dismissed flows in place of misses and the share
+  # of calibration flows dismissed in place of the benign one, false starts it at the first threshold that could pass
+  # with no attack
+  ltt_guarded_start: true
   # thresholds at the benign quantiles j / (grid_size + 1) of the selection parts, and at the levels of grid_tail,
   # where the misses of a scorer that restates the labelling rules may all lie
   grid_size: 1000

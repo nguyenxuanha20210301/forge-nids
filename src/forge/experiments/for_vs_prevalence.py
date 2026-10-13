@@ -267,10 +267,14 @@ def run(cfg: dict, run: runs.Run) -> None:
     grouped_below, grouped_n = group_rows(cal.family_below, cal.n_family, groups)
     pooled_below, pooled_n = cal.family_below.sum(1), cal.n_family.sum(1)
     no_floor = np.full(draws, np.nan)
+    # LTT starts by the rule of FORGE where the config asks for it, runs from before the switch start it at the first
+    # threshold that could pass with no attack
+    ltt_start = {"n": cal.n_benign + cal.n_family.sum(1), **start} if c.get("ltt_guarded_start", False) else {}
     offline = {
         "forge_simplex": certify(cal.benign_below, cal.n_benign, grouped_below, grouped_n, eps, delta, pi_max, part,
                                  **start),
-        "ltt_iid": {"index": ltt_iid(cal.benign_below, pooled_below, eps, delta)["index"], "floor": no_floor},
+        "ltt_iid": {"index": ltt_iid(cal.benign_below, pooled_below, eps, delta, **ltt_start)["index"],
+                    "floor": no_floor},
         "conformal_fnr": {"index": conformal_fnr(pooled_below, pooled_n, beta), "floor": no_floor},
         "fixed_sel": {"index": np.full(draws, fixed), "floor": no_floor},
     }

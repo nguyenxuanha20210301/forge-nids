@@ -190,17 +190,27 @@ def online_certifier(attack_below, n_attack, eps, delta, pi_max, delta_window=No
     return certify_window
 
 
-def ltt_iid(benign_below, attack_below, eps, delta):
+def ltt_iid(benign_below, attack_below, eps, delta, n=None, start_misses=0, start_slack=0.05):
     """the i.i.d. baseline of RQ1, Learn then Test with an exact binomial bound on the share of attacks among the
     dismissed calibration flows.
 
     attack_below holds all attacks in one row, shape (..., G). the guarantee holds only when deployment traffic keeps
-    the prevalence and the family mix of the calibration set.
+    the prevalence and the family mix of the calibration set. the sequence starts by the rule of certify, with r
+    attacks among the dismissed flows in place of r misses per family and the share of the n calibration flows
+    dismissed in place of the benign bound. start_misses 0 starts at the first threshold that could pass with no attack,
+    and needs no n. the start depends on the attack counts too, so the validity of either start is checked by
+    simulation.
     """
     dismissed = np.asarray(benign_below) + np.asarray(attack_below)
     upper = np.asarray(clopper_pearson_upper(attack_below, dismissed, delta))
+    if start_misses < 0:
+        raise ValueError(f"start_misses is {start_misses}, expected 0 or more")
+    if start_misses > 0 and n is None:
+        raise ValueError("a start that tolerates attacks compares dismissed shares, which needs the size n of each set")
+    share = np.zeros(dismissed.shape) if n is None else dismissed / np.asarray(n)[..., None]
+    with_misses = [np.asarray(clopper_pearson_upper(r, dismissed, delta)) for r in range(start_misses + 1)]
     # thresholds that dismiss too few flows to pass even with no attack among them are skipped, as in FORGE-Certify
-    first = first_index(np.asarray(clopper_pearson_upper(0, dismissed, delta)) <= eps)
+    first = _start(with_misses, share, eps, "feasible", start_slack)
     index = fixed_sequence(upper <= eps, first)
     return {"index": index, "bound": _take(upper, index, np.nan)}
 

@@ -26,9 +26,10 @@ def prevalence_axis(ax, summary: dict, bottom: bool) -> None:
 
 
 def for_by_prevalence(data, summary: dict, methods: list[str], line, mixes: list[str], mix_labels: dict,
-                      window: str, unit: str = "sessions") -> plt.Figure:
+                      window: str, unit: str = "sessions", lines=BEST_LINES) -> plt.Figure:
     """data holds the pooled rows of one set of windows, line gives the color, marker and label of a method, window
-    names the windows in the axis labels and unit what they hold."""
+    names the windows in the axis labels and unit what they hold. lines are the yardsticks of the dismissed panels, a
+    column of data each, drawn where data holds a value of it."""
     fig, axes = plt.subplots(len(mixes), 3, figsize=(style.WIDTH_DOUBLE, 0.5 + 2.2 * len(mixes)), sharex=True,
                              squeeze=False)
     # one row per mix of attack families. left, the FOR of the certified draw and window pairs, median and the 5% to 95%
@@ -46,9 +47,11 @@ def for_by_prevalence(data, summary: dict, methods: list[str], line, mixes: list
             row[2].plot(x, g["dismissed_mean"], markersize=3.5, linewidth=1.2, **line(method))
         # the yardsticks follow from the windows alone, and runs from before them lack them
         g = data[(data["method"] == methods[0]) & (data["mix"] == mix)].sort_values("prevalence")
-        if "best_up_to_pi_max_dismissed" in g:
+        drawn = [(name, dash, label) for name, dash, label in lines
+                 if f"{name}_dismissed" in g and g[f"{name}_dismissed"].notna().any()]
+        if drawn:
             yardsticks = [(row[2].plot(g["prevalence"], g[f"{name}_dismissed"], color=style.INK, linestyle=dash,
-                                       linewidth=1, label=label)[0], label) for name, dash, label in BEST_LINES]
+                                       linewidth=1, label=label)[0], label) for name, dash, label in drawn]
         row[0].axhline(summary["epsilon"], color=style.GRAY, linestyle="--", linewidth=1, label=r"$\varepsilon$")
         delta_line = row[1].axhline(summary["delta"], color=style.GRAY, linestyle="--", linewidth=1)
         row[0].set_ylabel(f"FOR in the {window}\n{mix_labels[mix]}")

@@ -90,6 +90,9 @@ COLUMNS = ["te", "row_id", "label", "family", "capture"]
 DERIVED = {"sp_range": ("sp", litnet2020.port_range)}
 # rows encoded and scored at a time
 CHUNK = 2_000_000
+# a third yardstick, the loosest threshold safe at pi_max for every mix the claim covers, in a dash the other lines
+# leave free
+EVERY_LINE = ("best_every_mix", (0, (4, 2)), r"best threshold for every mix up to $\pi_{\max}$")
 
 
 def raw_columns(features: list[str]) -> list[str]:
@@ -293,11 +296,15 @@ def run(cfg: dict, run: runs.Run) -> None:
     pooled_below, pooled_n = cal.family_below.sum(1), cal.n_family.sum(1)
     args = (eps, delta, pi_max, part_b)
     no_floor = np.full(draws, np.nan)
+    # LTT starts by the rule of FORGE where the config asks for it, runs from before the switch start it at the first
+    # threshold that could pass with no attack
+    ltt_start = {"n": cal.n_benign + cal.n_family.sum(1), **start} if c.get("ltt_guarded_start", False) else {}
     offline = {
         "forge_simplex": certify(cal.benign_below, cal.n_benign, grouped_below, grouped_n, *args, **start),
         "forge_pooled": certify(cal.benign_below, cal.n_benign, pooled_below[:, None], pooled_n[:, None], *args,
                                 **start),
-        "ltt_iid": {"index": ltt_iid(cal.benign_below, pooled_below, eps, delta)["index"], "floor": no_floor},
+        "ltt_iid": {"index": ltt_iid(cal.benign_below, pooled_below, eps, delta, **ltt_start)["index"],
+                    "floor": no_floor},
         "conformal_fnr": {"index": conformal_fnr(pooled_below, pooled_n, beta), "floor": no_floor},
         "fixed_sel": {"index": np.full(draws, fixed), "floor": no_floor},
     }
@@ -346,6 +353,10 @@ def run(cfg: dict, run: runs.Run) -> None:
             populations["real"] = (b_w, m_w_family, test_attacks)
         benign_w = reference_benign if g.filtered else int(win["sizes"][0])
         cell_base = {"window": i, "segment": g.label, "capture": g.capture}
+        # the threshold safe for every covered mix needs the attack distributions of every family, which a real window
+        # lacks, it holds those of its own capture only
+        every = {arm: judge.every_mix_threshold(pi_max, m_family, b, groups, shares_cal, eps)
+                 for arm, (b, m_family, _) in populations.items() if arm != "real"}
         for j, pi in enumerate(prevalences):
             full = int(round(benign_w / (1 - pi)))
             for k, mix in enumerate(mixes):
@@ -369,12 +380,17 @@ def run(cfg: dict, run: runs.Run) -> None:
                     online = certify_window(window_below, np.full(draws, n_w))
                     online_index[arm][i, j, k], online_floor[arm][i, j, k] = online["index"], online["floor"]
                     m = shares @ m_family
+                    j_every = every.get(arm, -1)
+                    every_share = (np.nan if arm not in every else
+                                   float(pi * m[j_every] + (1 - pi) * b[j_every]) if j_every >= 0 else 0.0)
                     rows += judge.evaluate(methods, offline, online, pi, m, b, attack_below, window_below, eps, values,
                                            {"arm": arm, **cell_base, "prevalence": pi, "mix": mix,
                                             "window_sessions": n_w, "benign_subsampled": subsampled,
                                             "in_claim": claim,
                                             "few_attacks": bool((attacks[shares > 0] < min_attacks).any()),
-                                            "draws": draws, **judge.best_thresholds(pi, pi_max, m, b, eps)})
+                                            "draws": draws, **judge.best_thresholds(pi, pi_max, m, b, eps),
+                                            "best_every_mix_index": j_every,
+                                            "best_every_mix_dismissed": every_share})
         own_claim = in_claim(own, shares_cal, groups)
         natural = np.nan if g.filtered else float(test_attacks.sum() / win["sizes"].sum())
         if not g.filtered:
@@ -429,7 +445,8 @@ def run(cfg: dict, run: runs.Run) -> None:
             if len(g):
                 certified = np.concatenate([values[(arm, method, pi, mix, w)] for w in g["window"]])
                 summary_rows.append({"arm": arm, "method": method, "prevalence": pi, "mix": mix, "subset": subset,
-                                     **judge.pooled(g, certified, draws)})
+                                     **judge.pooled(g, certified, draws),
+                                     "best_every_mix_dismissed": g["best_every_mix_dismissed"].mean()})
     by_prevalence = pd.DataFrame(summary_rows)
     run.save_table(by_prevalence, "by_prevalence")
 
@@ -469,10 +486,13 @@ def run(cfg: dict, run: runs.Run) -> None:
             if g.empty:
                 continue
             best = g.loc[g["prevalence"] == main, "best_up_to_pi_max_dismissed"]
+            every = g.loc[g["prevalence"] == main, "best_every_mix_dismissed"]
+            every_part = (f", by the loosest safe for every mix the claim covers {every.iloc[0]:.4f} at prevalence {main}"
+                          if len(every) and np.isfinite(every.iloc[0]) else "")
             run.log(f"best thresholds, {ARM_LABELS[arm]} in the claim, {mix} mix, mean share of window flows dismissed "
                     f"by the loosest threshold with FOR at or below epsilon up to pi_max "
-                    f"{best.iloc[0] if len(best) else np.nan:.4f} at prevalence {main}, by the loosest at the window's "
-                    "prevalence "
+                    f"{best.iloc[0] if len(best) else np.nan:.4f} at prevalence {main}{every_part}, by the loosest at "
+                    "the window's prevalence "
                     + ", ".join(f"{s:.4f} at {pi}" for pi, s in zip(g["prevalence"], g["best_at_prevalence_dismissed"])))
     # the table of E2, one line per window and arm with the family of its capture at the main prevalence, and one per
     # real window at its own prevalence
@@ -552,7 +572,7 @@ def _for_by_prevalence(run_dir, arm: str) -> plt.Figure:
     methods = [m for m in METHODS if m in summary["methods"]]
     data = table[(table["arm"] == arm) & (table["subset"] == "in_claim")]
     return prevalence.for_by_prevalence(data, summary, methods, _line, summary["mixes"], MIX_LABELS, WINDOW_WORDS[arm],
-                                        "flows")
+                                        "flows", [*BEST_LINES, EVERY_LINE])
 
 
 def fig_for_by_prevalence(run_dir) -> plt.Figure:
