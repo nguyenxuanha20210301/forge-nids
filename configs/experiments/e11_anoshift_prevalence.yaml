@@ -7,7 +7,8 @@ experiment:
   module: for_vs_prevalence
 
 # first and last year of each role, training, selection and calibration in the IID period of AnoShift, deployment in
-# its last IID year, where the score distributions may still hold, and in the NEAR and FAR periods, where they drift
+# its last IID year and in the NEAR and FAR periods. the blocks of every deployment year drift from the calibration
+# year, the IID one too
 split:
   train: [2006, 2007]
   selection: [2008, 2008]
@@ -64,7 +65,9 @@ deployment:
   mixes: [window, known]
   # the prevalence of the figure over windows
   main_prevalence: 0.1
-  # the period whose windows answer RQ1, the later periods show the drift
+  # the period whose blocks also get reference windows, with the benign count, prevalence and mix of the block's
+  # window and the score distributions of the calibration year, so label shift holds by construction. RQ1 is read on
+  # them, the real windows of every period show the drift
   main_period: iid
 
 simulation:

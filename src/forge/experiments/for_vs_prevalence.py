@@ -16,6 +16,11 @@ hold 15% to 99.4% attacks, above pi_max in every block, so only thinned windows 
 window of the thinned size from the block, with replacement, on which the online certificate runs and the realized
 share of attacks among the dismissed sessions is counted.
 
+each block of the main period also has a reference window, with the benign count, prevalence and mix of the block's
+window but the score distributions of the calibration year for each class and attack type, so label shift holds by
+construction. its true rate follows from those distributions, and its drawn window comes from them too. a reference
+window needs no attacks of the block, so it has every prevalence and mix.
+
 what each method claims.
     forge_simplex   Theorem 1, every prevalence up to pi_max and every mix of the attack families, valid while both
                     classes keep their calibration score distributions
@@ -37,10 +42,11 @@ sampling noise would decide the rate. a block that holds fewer attacks of a type
 on average has no window at that prevalence and mix.
 
 the offline claim holds while both classes keep their calibration score distributions, the online claim while the
-attack types do. AnoShift drifts far from its IID years in the NEAR and FAR years, in the scores of both classes, so
-RQ1 is read on the windows of the main period, the IID year after calibration, and the later periods show what the
-drift does to every method. the AUC of each window, its benign share dismissed and its miss rate per attack type at the
-offline FORGE thresholds, set against the same in the calibration year, show which assumption breaks where.
+attack types do. AnoShift drifts in the scores of both classes from block to block, in the IID year after calibration
+as well, so a real window mixes a change of prevalence with drift. RQ1 is read on the reference windows, and the real
+windows show what the drift does to every method. the AUC of each block, its benign share dismissed and its miss rate
+per attack type at the offline FORGE thresholds, set against the same in the calibration year, show which assumption
+breaks where.
 """
 
 import matplotlib.pyplot as plt
@@ -81,6 +87,8 @@ LOW, HIGH = 0.05, 0.95
 # a block's miss rate of an attack type enters the drift figure only from this many sessions of the type on, below it
 # a handful of sessions would decide the rate
 MIN_TYPE_SESSIONS = 1000
+# a real window takes the score distributions of its block, a reference window those of the calibration year
+ARMS = ["reference", "real"]
 
 
 def encoder() -> Encoder:
@@ -164,7 +172,8 @@ def score_years(cfg: dict, booster, enc: Encoder, years: list[int]):
 
 def evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below, eps, values, cell) -> list[dict]:
     # one row per method for one window, prevalence and mix. the true rate and dismissed share follow from the cdfs of
-    # the block at the grid, the realized share of attacks among the dismissed sessions from the drawn window
+    # the window's population at the grid, its block or the calibration year, the realized share of attacks among the
+    # dismissed sessions from the drawn window
     true_rate = for_from_rates(pi, m_w, b_w)
     true_share = pi * m_w + (1 - pi) * b_w
     rows = []
@@ -180,7 +189,7 @@ def evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below,
         caught = np.take_along_axis(attack_below, safe[:, None], 1)[:, 0]
         dismissed = np.take_along_axis(window_below, safe[:, None], 1)[:, 0]
         realized = hit & (caught > eps * dismissed)
-        values[(method, pi, cell["mix"], cell["window"])] = rate[hit]
+        values[(cell["arm"], method, pi, cell["mix"], cell["window"])] = rate[hit]
         draws = len(hit)
         rows.append({
             "method": method, **cell, "refused": float(np.mean(~hit)), "dismissed_mean": float(share.mean()),
@@ -200,6 +209,13 @@ def _type_range(windows: pd.DataFrame, family: str) -> str:
     if kept.empty:
         return f"{family} in no block with {MIN_TYPE_SESSIONS} sessions"
     return f"{family} {kept.min():.4f} to {kept.max():.4f} over {len(kept)} blocks"
+
+
+def _type_rate(window: pd.Series, family: str) -> str:
+    # the miss rate of one attack type in one block, with the sessions it rests on
+    if window[family] == 0:
+        return f"{family} absent"
+    return f"{family} {window[f'forge_miss_{family}']:.4f} over {window[family]} sessions"
 
 
 def run(cfg: dict, run: runs.Run) -> None:
@@ -301,8 +317,10 @@ def run(cfg: dict, run: runs.Run) -> None:
             + ", ".join(f"{f} {e:.0f}" for f, e in zip(FAMILIES, expected))
             + f", a type needs {minimum} to stand alone, families " + ", ".join("+".join(f) for f in families))
 
-    # one stream for the calibration sets and one for each window, prevalence and mix
-    seeds = np.random.SeedSequence(cfg["seed"]).spawn(1 + len(windows) * len(prevalences) * len(mixes))
+    # one stream for the calibration sets, one for each window, prevalence and mix, then one for each reference window,
+    # prevalence and mix in the same layout, whether its block has a reference window or not
+    cells = len(windows) * len(prevalences) * len(mixes)
+    seeds = np.random.SeedSequence(cfg["seed"]).spawn(1 + 2 * cells)
     cal = draw_counts(np.random.default_rng(seeds[0]), n_cal, pi_cal, shares_cal, b_cal, m_cal_family, draws)
     grouped_below, grouped_n = group_rows(cal.family_below, cal.n_family, groups)
     pooled_below, pooled_n = cal.family_below.sum(1), cal.n_family.sum(1)
@@ -338,33 +356,39 @@ def run(cfg: dict, run: runs.Run) -> None:
 
     rows, values, skipped = [], {}, []
     shape = (len(windows), len(prevalences), len(mixes), draws)
-    online_index = np.full(shape, -1, dtype=np.int16)
-    online_floor = np.zeros(shape, dtype=np.float32)
+    online_index = {arm: np.full(shape, -1, dtype=np.int16) for arm in ARMS}
+    online_floor = {arm: np.zeros(shape, dtype=np.float32) for arm in ARMS}
+    offset = {"real": 1, "reference": 1 + cells}
     for i, win in enumerate(windows):
         b_w, m_w_family, _, shares_w = rates(win)
         period = anoshift.period(win["year"])
         position = win["year"] + (win["block"] + 0.5) / d["blocks_per_year"]
+        # the score distributions each window is drawn from and evaluated on
+        population = {"real": (b_w, m_w_family)}
+        if period == dep["main_period"]:
+            population["reference"] = (b_cal, m_cal_family)
         for j, pi in enumerate(prevalences):
             n_w = int(round(win["sizes"][0] / (1 - pi)))
             for k, mix in enumerate(mixes):
                 shares = mix_shares(mix, shares_w, shares_cal)
-                # a window stands for the block thinned to its prevalence and mix, so the block must hold at least the
-                # attacks of each type that the window takes on average. a rare type of the calibration mix may lack
-                # them in a block, whose few sessions of that type would otherwise decide the rate alone
-                if np.any(win["sizes"][1:] < n_w * pi * shares):
-                    skipped.append([win["year"], win["block"], pi, mix])
-                    continue
-                rng = np.random.default_rng(seeds[1 + (i * len(prevalences) + j) * len(mixes) + k])
-                drawn = draw_counts(rng, n_w, pi, shares, b_w, m_w_family, draws)
-                attack_below = drawn.family_below.sum(1)
-                window_below = drawn.benign_below + attack_below
-                online = certify_window(window_below, np.full(draws, n_w))
-                online_index[i, j, k], online_floor[i, j, k] = online["index"], online["floor"]
-                m_w = shares @ m_w_family
-                rows += evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below, eps, values,
-                                 {"window": i, "year": win["year"], "block": win["block"], "period": period,
-                                  "position": position, "prevalence": pi, "mix": mix, "window_sessions": n_w,
-                                  "draws": draws})
+                for arm, (b, m_family) in population.items():
+                    # a real window stands for the block thinned to its prevalence and mix, so the block must hold at
+                    # least the attacks of each type that the window takes on average. a rare type of the calibration
+                    # mix may lack them in a block, whose few sessions of that type would otherwise decide the rate
+                    if arm == "real" and np.any(win["sizes"][1:] < n_w * pi * shares):
+                        skipped.append([win["year"], win["block"], pi, mix])
+                        continue
+                    rng = np.random.default_rng(seeds[offset[arm] + (i * len(prevalences) + j) * len(mixes) + k])
+                    drawn = draw_counts(rng, n_w, pi, shares, b, m_family, draws)
+                    attack_below = drawn.family_below.sum(1)
+                    window_below = drawn.benign_below + attack_below
+                    online = certify_window(window_below, np.full(draws, n_w))
+                    online_index[arm][i, j, k], online_floor[arm][i, j, k] = online["index"], online["floor"]
+                    rows += evaluate(methods, offline, online, pi, shares @ m_family, b, attack_below, window_below,
+                                     eps, values,
+                                     {"arm": arm, "window": i, "year": win["year"], "block": win["block"],
+                                      "period": period, "position": position, "prevalence": pi, "mix": mix,
+                                      "window_sessions": n_w, "draws": draws})
     for mix in mixes:
         left = [s for s in skipped if s[-1] == mix]
         if left:
@@ -392,17 +416,22 @@ def run(cfg: dict, run: runs.Run) -> None:
         run.log(f"{period} windows {len(g)}, AUC {g['auc'].min():.4f} to {g['auc'].max():.4f}, at the offline FORGE "
                 f"thresholds benign share dismissed {g['forge_benign_dismissed'].min():.4f} to "
                 f"{g['forge_benign_dismissed'].max():.4f}, miss rate " + ", ".join(_type_range(g, f) for f in FAMILIES))
+    for _, w in window_table[window_table["period"] == dep["main_period"]].iterrows():
+        run.log(f"{w['year']} block {w['block']}, AUC {w['auc']:.4f}, attack share {w['attack_share']:.4f}, at the "
+                f"offline FORGE thresholds benign share dismissed {w['forge_benign_dismissed']:.4f}, miss rate "
+                + ", ".join(_type_rate(w, f) for f in FAMILIES))
 
-    # pooled over the windows of each period and of all deployment years, the FOR quantiles over the certified draw
-    # and window pairs, the violation share over all pairs with its range over the windows
+    # pooled over the windows of each arm within each period and over all deployment years, the FOR quantiles over the
+    # certified draw and window pairs, the violation share over all pairs with its range over the windows
     summary_rows = []
-    for (method, pi, mix), cell in claims.groupby(["method", "prevalence", "mix"], sort=False):
+    for (arm, method, pi, mix), cell in claims.groupby(["arm", "method", "prevalence", "mix"], sort=False):
         for name in ["all", *dict.fromkeys(cell["period"])]:
             g = cell if name == "all" else cell[cell["period"] == name]
-            certified = np.concatenate([values[(method, pi, mix, w)] for w in g["window"]])
+            certified = np.concatenate([values[(arm, method, pi, mix, w)] for w in g["window"]])
             pairs = len(g) * draws
             summary_rows.append({
-                "method": method, "prevalence": pi, "mix": mix, "period": name, "windows": len(g), "pairs": pairs,
+                "arm": arm, "method": method, "prevalence": pi, "mix": mix, "period": name, "windows": len(g),
+                "pairs": pairs,
                 "violation_rate": g["violations"].sum() / pairs, "violation_window_min": g["rate"].min(),
                 "violation_window_max": g["rate"].max(), "refused": g["refused"].mean(),
                 "dismissed_mean": g["dismissed_mean"].mean(),
@@ -415,36 +444,40 @@ def run(cfg: dict, run: runs.Run) -> None:
     run.save_table(by_prevalence, "by_prevalence")
 
     # the claim of each FORGE method covers prevalences up to pi_max, at the calibration mix once rare types are merged,
-    # and the largest window violation share there, within each period, is the number to set against delta
+    # and the largest window violation share there, within each arm and period, is the number to set against delta
     covered = claims[claims["prevalence"] <= pi_max]
     largest = {}
-    for (method, period, mix), g in covered.groupby(["method", "period", "mix"], sort=False):
+    for (arm, method, period, mix), g in covered.groupby(["arm", "method", "period", "mix"], sort=False):
         top = g.loc[g["rate"].idxmax()]
-        largest.setdefault(method, {}).setdefault(period, {})[mix] = {
+        largest.setdefault(arm, {}).setdefault(method, {}).setdefault(period, {})[mix] = {
             "year": int(top["year"]), "block": int(top["block"]), "prevalence": float(top["prevalence"]),
             "rate": float(top["rate"]), "low": float(top["low"]), "high": float(top["high"])}
     main = dep["main_prevalence"]
-    for period in periods:
-        for mix in mixes:
-            for method in methods:
-                g = by_prevalence[(by_prevalence["method"] == method) & (by_prevalence["period"] == period)
-                                  & (by_prevalence["mix"] == mix)].sort_values("prevalence")
-                if g.empty:
-                    continue
-                top = largest.get(method, {}).get(period, {}).get(mix)
-                if top is None:
-                    worst = "no window up to pi_max"
-                elif top["rate"] == 0:
-                    worst = "none in any window up to pi_max"
-                else:
-                    worst = (f"at most {top['rate']:.4f} in one window up to pi_max, {top['year']} block "
-                             f"{top['block']} at prevalence {top['prevalence']}")
-                dismissed = g.loc[g["prevalence"] == main, "dismissed_mean"]
-                run.log(f"{method}, {period} windows, {mix} mix, FOR above epsilon in "
-                        + ", ".join(f"{r:.4f} at {pi}" for pi, r in zip(g["prevalence"], g["violation_rate"]))
-                        + f" of draw and window pairs, {worst}, refused {g['refused'].mean():.3f}, mean share of "
-                        f"window sessions dismissed {dismissed.iloc[0] if len(dismissed) else np.nan:.4f} at "
-                        f"prevalence {main}")
+    # the reference windows first, RQ1 is read on them, and only the main period has them
+    for arm in ARMS:
+        for period in periods:
+            name = f"{period} windows" if arm == "real" else f"{period} reference windows"
+            for mix in mixes:
+                for method in methods:
+                    g = by_prevalence[(by_prevalence["arm"] == arm) & (by_prevalence["method"] == method)
+                                      & (by_prevalence["period"] == period)
+                                      & (by_prevalence["mix"] == mix)].sort_values("prevalence")
+                    if g.empty:
+                        continue
+                    top = largest.get(arm, {}).get(method, {}).get(period, {}).get(mix)
+                    if top is None:
+                        worst = "no window up to pi_max"
+                    elif top["rate"] == 0:
+                        worst = "none in any window up to pi_max"
+                    else:
+                        worst = (f"at most {top['rate']:.4f} in one window up to pi_max, {top['year']} block "
+                                 f"{top['block']} at prevalence {top['prevalence']}")
+                    dismissed = g.loc[g["prevalence"] == main, "dismissed_mean"]
+                    run.log(f"{method}, {name}, {mix} mix, FOR above epsilon in "
+                            + ", ".join(f"{r:.4f} at {pi}" for pi, r in zip(g["prevalence"], g["violation_rate"]))
+                            + f" of draw and window pairs, {worst}, refused {g['refused'].mean():.3f}, mean share of "
+                            f"window sessions dismissed {dismissed.iloc[0] if len(dismissed) else np.nan:.4f} at "
+                            f"prevalence {main}")
 
     grid_table = pd.DataFrame({"index": np.arange(len(grid)), "threshold": grid, "selection_benign": b_sel,
                                "selection_attack": m_sel, "calibration_benign": b_cal, "calibration_attack": m_cal})
@@ -464,8 +497,11 @@ def run(cfg: dict, run: runs.Run) -> None:
                     window_family_below=stacked(windows, "family_below"), window_sizes=stacked(windows, "sizes"))
     run.save_arrays("draws", prevalences=np.array(prevalences), mixes=np.array(mixes),
                     forge_floor=offline["forge_simplex"]["floor"],
-                    **{f"{m}_index": out["index"] for m, out in offline.items()}, online_index=online_index,
-                    online_floor=online_floor, counts=np.column_stack([cal.n_benign, cal.n_family]))
+                    **{f"{m}_index": out["index"] for m, out in offline.items()},
+                    online_index=online_index["real"], online_floor=online_floor["real"],
+                    reference_online_index=online_index["reference"],
+                    reference_online_floor=online_floor["reference"],
+                    counts=np.column_stack([cal.n_benign, cal.n_family]))
     run.save_json({"encoder": enc.to_dict(), "params": sc["params"], "rounds": sc["rounds"],
                    "early_stopping": sc["early_stopping"], "best_iteration": booster.best_iteration,
                    "selection_loss": sel_loss,
@@ -480,8 +516,8 @@ def run(cfg: dict, run: runs.Run) -> None:
         "calibration_prevalence": pi_cal, "calibration_sessions": n_cal,
         "calibration_expected_attacks": dict(zip(FAMILIES, expected.tolist())),
         "fixed_index": fixed, "beta": beta, "prevalences": prevalences, "main_prevalence": main,
-        "deployment_periods": periods, "main_period": dep["main_period"], "mixes": mixes, "skipped": skipped,
-        "methods": methods, "draws": draws, "windows": len(windows),
+        "deployment_periods": periods, "main_period": dep["main_period"], "arms": ARMS, "mixes": mixes,
+        "skipped": skipped, "methods": methods, "draws": draws, "windows": len(windows),
         "offline_refused": {m: float(np.mean(out["index"] < 0)) for m, out in offline.items()},
         "selection_auc": sel_auc, "calibration_auc": cal_auc, "forge_calibration": forge_cal,
         "min_type_sessions": MIN_TYPE_SESSIONS, "largest_violation_up_to_pi_max": largest,
@@ -507,14 +543,31 @@ def _prevalence_axis(ax, summary: dict, bottom: bool) -> None:
         ax.set_xlabel("attack prevalence in the window")
 
 
+def _arm(table: pd.DataFrame, arm: str) -> pd.DataFrame:
+    # runs from before the reference windows hold real windows only
+    return table[table["arm"] == arm] if "arm" in table else table
+
+
 def fig_for_by_prevalence(run_dir) -> plt.Figure:
+    # the reference windows of the main period, where label shift holds by construction, the figure of RQ1
+    return _for_by_prevalence(run_dir, "reference")
+
+
+def fig_for_by_prevalence_real(run_dir) -> plt.Figure:
+    # the real windows of the main period, with the drift of their blocks
+    return _for_by_prevalence(run_dir, "real")
+
+
+def _for_by_prevalence(run_dir, arm: str) -> plt.Figure:
     style.use()
     table = runs.load_table(run_dir, "by_prevalence")
     summary = runs.load_json(run_dir, "summary")
     methods = [m for m in METHODS if m in summary["methods"]]
     mixes = summary["mixes"]
     # the windows of the main period, all deployment windows in runs from before the periods were set apart
-    data = table[table["period"] == summary.get("main_period", "all")]
+    data = _arm(table, arm)
+    data = data[data["period"] == summary.get("main_period", "all")]
+    window = "reference window" if arm == "reference" and "arm" in table else "window"
     fig, axes = plt.subplots(len(mixes), 3, figsize=(style.WIDTH_DOUBLE, 0.5 + 2.2 * len(mixes)), sharex=True,
                              squeeze=False)
     # one row per mix of attack types. left, the FOR of the certified draw and window pairs, median and the 5% to 95%
@@ -530,7 +583,7 @@ def fig_for_by_prevalence(run_dir) -> plt.Figure:
             row[2].plot(x, g["dismissed_mean"], markersize=3.5, linewidth=1.2, **_line(method))
         row[0].axhline(summary["epsilon"], color=style.GRAY, linestyle="--", linewidth=1, label=r"$\varepsilon$")
         delta_line = row[1].axhline(summary["delta"], color=style.GRAY, linestyle="--", linewidth=1)
-        row[0].set_ylabel(f"FOR in the window\n{MIX_LABELS[mix]}")
+        row[0].set_ylabel(f"FOR in the {window}\n{MIX_LABELS[mix]}")
         row[1].set_ylim(-0.02, 1.02)
         row[1].set_ylabel(r"share with FOR > $\varepsilon$")
         row[2].set_ylim(0, 1)
@@ -558,11 +611,12 @@ def fig_violation_by_window(run_dir) -> plt.Figure:
     summary = runs.load_json(run_dir, "summary")
     methods = [m for m in METHODS if m in summary["methods"]]
     mixes = summary["mixes"]
-    data = claims[claims["prevalence"] == summary["main_prevalence"]]
+    data = _arm(claims, "real")
+    data = data[data["prevalence"] == summary["main_prevalence"]]
     fig, axes = plt.subplots(len(mixes) + 1, 1, figsize=(style.WIDTH_DOUBLE, 0.8 + 1.7 * (len(mixes) + 1)),
                              sharex=True)
-    # one row per mix with the share of draws with FOR above epsilon in each window and its 95% interval, the last row
-    # with the mean share of the window sessions dismissed at the first mix. a block that cannot be thinned to a mix
+    # one row per mix with the share of draws with FOR above epsilon in each real window and its 95% interval, the last
+    # row with the mean share of the window sessions dismissed at the first mix. a block that cannot be thinned to a mix
     # has no point in its row
     step = 0.15 / summary["blocks_per_year"]
     for k, method in enumerate(methods):
@@ -644,6 +698,7 @@ def _time_axes(axes, summary: dict) -> None:
 
 FIGURES = {
     "for_by_prevalence": fig_for_by_prevalence,
+    "for_by_prevalence_real": fig_for_by_prevalence_real,
     "violation_by_window": fig_violation_by_window,
     "drift_by_window": fig_drift_by_window,
 }
