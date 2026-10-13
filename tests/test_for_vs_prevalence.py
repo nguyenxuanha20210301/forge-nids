@@ -158,6 +158,18 @@ def test_e11_tables_figures_and_window_rates(anoshift_signal, tmp_path):
         assert np.isclose(row.rate, np.mean(np.where(hit, rate[np.maximum(index, 0)], 0.0) > EPS))
         assert np.isclose(row.dismissed_mean, np.where(hit, share[np.maximum(index, 0)], 0.0).mean())
         assert np.isclose(row.refused, np.mean(~hit))
+        # the best thresholds are the loosest whose true FOR stays at or below epsilon at the window's prevalence and
+        # at pi_max, and the sessions they dismiss
+        for name, at in [("best_at_prevalence", row.prevalence), ("best_up_to_pi_max", 0.3)]:
+            safe = np.flatnonzero(for_from_rates(at, miss, b) <= EPS)
+            best = safe[-1] if len(safe) else -1
+            assert getattr(row, f"{name}_index") == best
+            assert np.isclose(getattr(row, f"{name}_dismissed"), share[best] if best >= 0 else 0.0)
+    # a threshold safe up to pi_max is safe at every lower prevalence, and one safe above pi_max is safe at pi_max
+    below, above = claims[claims["prevalence"] < 0.3], claims[claims["prevalence"] > 0.3]
+    assert (below["best_up_to_pi_max_index"] <= below["best_at_prevalence_index"]).all()
+    assert (above["best_up_to_pi_max_index"] >= above["best_at_prevalence_index"]).all()
+    assert (claims["best_at_prevalence_index"] >= 0).all()
     assert (draws["fixed_sel_index"] == fixed).all()
     for key in ["online_index", "reference_online_index"]:
         assert draws[key].shape == (len(windows), len(prevalences), len(mixes), DRAWS)
@@ -206,6 +218,18 @@ def test_e11_tables_figures_and_window_rates(anoshift_signal, tmp_path):
         assert f"{method}, iid reference windows, known mix, FOR above epsilon in " in log
         for period in summary["deployment_periods"]:
             assert f"{method}, {period} windows, known mix, FOR above epsilon in " in log
+    by_prevalence = runs.load_table(run.dir, "by_prevalence")
+    for arm, period, name in [("reference", "iid", "iid reference windows"), ("real", "iid", "iid windows"),
+                              ("real", "near", "near windows")]:
+        g = by_prevalence[(by_prevalence["arm"] == arm) & (by_prevalence["period"] == period)
+                          & (by_prevalence["mix"] == "known") & (by_prevalence["method"] == methods[0])]
+        g = g.sort_values("prevalence")
+        best = g.loc[g["prevalence"] == dep["main_prevalence"], "best_up_to_pi_max_dismissed"].iloc[0]
+        assert (f"best thresholds, {name}, known mix, mean share of window sessions dismissed by the loosest threshold "
+                f"with FOR at or below epsilon up to pi_max {best:.4f} at prevalence {dep['main_prevalence']}, by the "
+                f"loosest at the window's prevalence "
+                + ", ".join(f"{s:.4f} at {pi}" for pi, s in zip(g["prevalence"], g["best_at_prevalence_dismissed"]))
+                ) in log
     assert "near reference windows" not in log
     # each block of the main period has its own line, with the sessions its miss rates rest on
     for w in windows[windows["period"] == "iid"].itertuples():
@@ -222,7 +246,6 @@ def test_e11_tables_figures_and_window_rates(anoshift_signal, tmp_path):
     assert ltt["rate"].min()[0.4] == 1 and ltt["rate"].max()[0.05] == 0
     assert ltt["realized_rate"].min()[0.4] > 0.8 and ltt["realized_rate"].max()[0.05] < 0.2
 
-    by_prevalence = runs.load_table(run.dir, "by_prevalence")
     keys = ["arm", "method", "prevalence", "mix"]
     pooled = by_prevalence[by_prevalence["period"] == "all"].set_index(keys).sort_index()
     for key, g in claims.groupby(keys):
@@ -230,6 +253,8 @@ def test_e11_tables_figures_and_window_rates(anoshift_signal, tmp_path):
         assert pooled.loc[key, "violation_window_max"] == g["rate"].max()
         assert pooled.loc[key, "windows"] == len(g)
         assert np.isclose(pooled.loc[key, "dismissed_mean"], g["dismissed_mean"].mean())
+        for name in ["best_at_prevalence_dismissed", "best_up_to_pi_max_dismissed"]:
+            assert np.isclose(pooled.loc[key, name], g[name].mean())
         rates = np.concatenate(certified[key])
         if len(rates):
             assert np.isclose(pooled.loc[key, "for_median"], np.median(rates))
@@ -238,22 +263,29 @@ def test_e11_tables_figures_and_window_rates(anoshift_signal, tmp_path):
 
     # the figure of RQ1 shows the reference windows of the main period, the second figure over prevalences its real
     # windows, and the figure over windows the real window of every block
-    def drawn(ax, method):
-        [line] = [line for line in ax.get_lines() if line.get_label() == module.LABELS[method]]
+    def drawn(ax, label):
+        [line] = [line for line in ax.get_lines() if line.get_label() == label]
         return line.get_ydata()
 
     main = by_prevalence[(by_prevalence["period"] == "iid") & (by_prevalence["mix"] == "window")]
+    assert {column: label for column, _, label in module.BEST_LINES} == {
+        "best_up_to_pi_max": r"best threshold up to $\pi_{\max}$",
+        "best_at_prevalence": r"best threshold at the window's $\pi$"}
     for name, arm in [("for_by_prevalence", "reference"), ("for_by_prevalence_real", "real")]:
         fig = module.FIGURES[name](run.dir)
         for method in methods:
             g = main[(main["arm"] == arm) & (main["method"] == method)].sort_values("prevalence")
-            assert np.array_equal(drawn(fig.axes[2], method), g["dismissed_mean"].to_numpy())
+            assert np.array_equal(drawn(fig.axes[2], module.LABELS[method]), g["dismissed_mean"].to_numpy())
+        for column, _, label in module.BEST_LINES:
+            assert np.array_equal(drawn(fig.axes[2], label), g[f"{column}_dismissed"].to_numpy())
         plt.close(fig)
     fig = module.FIGURES["violation_by_window"](run.dir)
     for method in methods:
         g = claims[(claims["arm"] == "real") & (claims["method"] == method) & (claims["mix"] == "window")
                    & (claims["prevalence"] == dep["main_prevalence"])].sort_values("position")
-        assert np.array_equal(drawn(fig.axes[-1], method), g["dismissed_mean"].to_numpy())
+        assert np.array_equal(drawn(fig.axes[-1], module.LABELS[method]), g["dismissed_mean"].to_numpy())
+    column, _, label = module.BEST_LINES[0]
+    assert np.array_equal(drawn(fig.axes[-1], label), g[f"{column}_dismissed"].to_numpy())
     plt.close(fig)
 
     # per session scores of the selection, calibration and deployment years, in the order of the processed table
@@ -282,6 +314,26 @@ def test_e11_tables_figures_and_window_rates(anoshift_signal, tmp_path):
     again, _ = run_e11(cfg, tmp_path / "again")
     assert runs.load_table(again.dir, "claims").equals(claims)
     assert np.array_equal(runs.load_arrays(again.dir, "scores")["score"], scores["score"])
+
+
+def test_best_thresholds_take_the_loosest_safe_threshold_past_an_unsafe_one():
+    # the FOR of a drifted window need not rise with the threshold. here it exceeds epsilon at the second threshold only
+    # at the window's prevalence, and from the second on at pi_max, so the best threshold at the prevalence is the last
+    # one, past the unsafe second, and the best one up to pi_max the first
+    module = experiments.get("for_vs_prevalence")
+    m, b, eps = np.array([0.001, 0.06, 0.06, 0.07]), np.array([0.5, 0.55, 0.9, 0.95]), 0.001
+    assert list(for_from_rates(0.01, m, b) <= eps) == [True, False, True, True]
+    assert list(for_from_rates(0.1, m, b) <= eps) == [True, False, False, False]
+    out = module.best_thresholds(0.01, 0.1, m, b, eps)
+    assert out["best_at_prevalence_index"] == 3 and out["best_up_to_pi_max_index"] == 0
+    assert np.isclose(out["best_at_prevalence_dismissed"], 0.01 * 0.07 + 0.99 * 0.95)
+    assert np.isclose(out["best_up_to_pi_max_dismissed"], 0.01 * 0.001 + 0.99 * 0.5)
+    # a window whose FOR exceeds epsilon at every threshold has no best threshold and dismisses nothing
+    none = module.best_thresholds(0.01, 0.1, np.full(4, 0.5), np.full(4, 0.01), eps)
+    assert none["best_at_prevalence_index"] == -1 and none["best_at_prevalence_dismissed"] == 0.0
+    # a FOR equal to epsilon counts as safe, as in the certificates, here no attack dismissed at epsilon 0
+    edge = module.best_thresholds(0.01, 0.1, np.array([0.0, 0.0, 0.1]), np.array([0.1, 0.2, 0.3]), 0.0)
+    assert edge["best_at_prevalence_index"] == 1 and edge["best_up_to_pi_max_index"] == 1
 
 
 def test_e11_main_period_must_be_among_the_deployment_periods(anoshift_signal, tmp_path):

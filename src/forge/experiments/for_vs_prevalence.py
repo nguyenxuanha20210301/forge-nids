@@ -21,6 +21,12 @@ window but the score distributions of the calibration year for each class and at
 construction. its true rate follows from those distributions, and its drawn window comes from them too. a reference
 window needs no attacks of the block, so it has every prevalence and mix.
 
+two thresholds of every window serve as yardsticks for the dismissed share. the best one up to pi_max is the loosest
+grid threshold whose true FOR in the window stays at or below epsilon at every prevalence up to pi_max, the best a
+method that knows the window's distributions but not its prevalence could dismiss. the best one at the prevalence is
+the loosest whose true FOR stays at or below epsilon at the window's own prevalence, which knowing the prevalence too
+would allow.
+
 what each method claims.
     forge_simplex   Theorem 1, every prevalence up to pi_max and every mix of the attack families, valid while both
                     classes keep their calibration score distributions
@@ -89,6 +95,10 @@ LOW, HIGH = 0.05, 0.95
 MIN_TYPE_SESSIONS = 1000
 # a real window takes the score distributions of its block, a reference window those of the calibration year
 ARMS = ["reference", "real"]
+# the yardsticks in the panels of dismissed shares, in the color of no method, without markers, and in line styles
+# that the gray lines of epsilon, delta, the calibration prevalence and pi_max leave free
+BEST_LINES = [("best_up_to_pi_max", "-", r"best threshold up to $\pi_{\max}$"),
+              ("best_at_prevalence", (0, (1, 1)), r"best threshold at the window's $\pi$")]
 
 
 def encoder() -> Encoder:
@@ -168,6 +178,20 @@ def score_years(cfg: dict, booster, enc: Encoder, years: list[int]):
             "order": flows["order"].to_numpy(np.int32),
             "block": splits.order_blocks(np.zeros(len(flows), dtype=np.int8), per_year),
         }
+
+
+def best_thresholds(pi, pi_max, m_w, b_w, eps) -> dict:
+    # the loosest grid threshold whose true FOR in the window stays at or below epsilon at its prevalence, and the
+    # loosest that does so up to pi_max, where it is largest since the rate rises with the prevalence, with the share of
+    # the window sessions each dismisses. that share grows with the threshold, and -1 dismisses nothing
+    share = pi * m_w + (1 - pi) * b_w
+    out = {}
+    for name, at in [("best_at_prevalence", pi), ("best_up_to_pi_max", pi_max)]:
+        safe = np.flatnonzero(for_from_rates(at, m_w, b_w) <= eps)
+        index = int(safe[-1]) if len(safe) else -1
+        out[f"{name}_index"] = index
+        out[f"{name}_dismissed"] = float(share[index]) if index >= 0 else 0.0
+    return out
 
 
 def evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below, eps, values, cell) -> list[dict]:
@@ -384,11 +408,12 @@ def run(cfg: dict, run: runs.Run) -> None:
                     window_below = drawn.benign_below + attack_below
                     online = certify_window(window_below, np.full(draws, n_w))
                     online_index[arm][i, j, k], online_floor[arm][i, j, k] = online["index"], online["floor"]
-                    rows += evaluate(methods, offline, online, pi, shares @ m_family, b, attack_below, window_below,
-                                     eps, values,
+                    m = shares @ m_family
+                    rows += evaluate(methods, offline, online, pi, m, b, attack_below, window_below, eps, values,
                                      {"arm": arm, "window": i, "year": win["year"], "block": win["block"],
                                       "period": period, "position": position, "prevalence": pi, "mix": mix,
-                                      "window_sessions": n_w, "draws": draws})
+                                      "window_sessions": n_w, "draws": draws,
+                                      **best_thresholds(pi, pi_max, m, b, eps)})
     for mix in mixes:
         left = [s for s in skipped if s[-1] == mix]
         if left:
@@ -435,6 +460,8 @@ def run(cfg: dict, run: runs.Run) -> None:
                 "violation_rate": g["violations"].sum() / pairs, "violation_window_min": g["rate"].min(),
                 "violation_window_max": g["rate"].max(), "refused": g["refused"].mean(),
                 "dismissed_mean": g["dismissed_mean"].mean(),
+                "best_at_prevalence_dismissed": g["best_at_prevalence_dismissed"].mean(),
+                "best_up_to_pi_max_dismissed": g["best_up_to_pi_max_dismissed"].mean(),
                 "for_median": float(np.median(certified)) if len(certified) else np.nan,
                 "for_low": float(np.quantile(certified, LOW)) if len(certified) else np.nan,
                 "for_high": float(np.quantile(certified, HIGH)) if len(certified) else np.nan,
@@ -458,10 +485,10 @@ def run(cfg: dict, run: runs.Run) -> None:
         for period in periods:
             name = f"{period} windows" if arm == "real" else f"{period} reference windows"
             for mix in mixes:
+                same = by_prevalence[(by_prevalence["arm"] == arm) & (by_prevalence["period"] == period)
+                                     & (by_prevalence["mix"] == mix)]
                 for method in methods:
-                    g = by_prevalence[(by_prevalence["arm"] == arm) & (by_prevalence["method"] == method)
-                                      & (by_prevalence["period"] == period)
-                                      & (by_prevalence["mix"] == mix)].sort_values("prevalence")
+                    g = same[same["method"] == method].sort_values("prevalence")
                     if g.empty:
                         continue
                     top = largest.get(arm, {}).get(method, {}).get(period, {}).get(mix)
@@ -478,6 +505,17 @@ def run(cfg: dict, run: runs.Run) -> None:
                             + f" of draw and window pairs, {worst}, refused {g['refused'].mean():.3f}, mean share of "
                             f"window sessions dismissed {dismissed.iloc[0] if len(dismissed) else np.nan:.4f} at "
                             f"prevalence {main}")
+                # the yardsticks follow from the windows alone, so the rows of any method hold them
+                g = same[same["method"] == methods[0]].sort_values("prevalence")
+                if g.empty:
+                    continue
+                best = g.loc[g["prevalence"] == main, "best_up_to_pi_max_dismissed"]
+                run.log(f"best thresholds, {name}, {mix} mix, mean share of window sessions dismissed by the loosest "
+                        f"threshold with FOR at or below epsilon up to pi_max "
+                        f"{best.iloc[0] if len(best) else np.nan:.4f} at prevalence {main}, by the loosest at the "
+                        f"window's prevalence "
+                        + ", ".join(f"{s:.4f} at {pi}" for pi, s in zip(g["prevalence"],
+                                                                       g["best_at_prevalence_dismissed"])))
 
     grid_table = pd.DataFrame({"index": np.arange(len(grid)), "threshold": grid, "selection_benign": b_sel,
                                "selection_attack": m_sel, "calibration_benign": b_cal, "calibration_attack": m_cal})
@@ -572,7 +610,9 @@ def _for_by_prevalence(run_dir, arm: str) -> plt.Figure:
                              squeeze=False)
     # one row per mix of attack types. left, the FOR of the certified draw and window pairs, median and the 5% to 95%
     # range. middle, the share of all pairs with FOR above epsilon, a refusal counting as no violation, with the range
-    # of the per window shares. right, the mean share of the window sessions dismissed, a refusal counting as none
+    # of the per window shares. right, the mean share of the window sessions dismissed, a refusal counting as none,
+    # with the two best thresholds of the same windows
+    yardsticks = []
     for row, mix in zip(axes, mixes):
         for k, method in enumerate(methods):
             g = data[(data["method"] == method) & (data["mix"] == mix)].sort_values("prevalence")
@@ -581,6 +621,11 @@ def _for_by_prevalence(run_dir, arm: str) -> plt.Figure:
             layout.points(row[1], x, g["violation_rate"], g["violation_window_min"], g["violation_window_max"],
                           **_line(method))
             row[2].plot(x, g["dismissed_mean"], markersize=3.5, linewidth=1.2, **_line(method))
+        # the yardsticks follow from the windows alone, and runs from before them lack them
+        g = data[(data["method"] == methods[0]) & (data["mix"] == mix)].sort_values("prevalence")
+        if "best_up_to_pi_max_dismissed" in g:
+            yardsticks = [(row[2].plot(g["prevalence"], g[f"{name}_dismissed"], color=style.INK, linestyle=dash,
+                                       linewidth=1, label=label)[0], label) for name, dash, label in BEST_LINES]
         row[0].axhline(summary["epsilon"], color=style.GRAY, linestyle="--", linewidth=1, label=r"$\varepsilon$")
         delta_line = row[1].axhline(summary["delta"], color=style.GRAY, linestyle="--", linewidth=1)
         row[0].set_ylabel(f"FOR in the {window}\n{MIX_LABELS[mix]}")
@@ -601,7 +646,7 @@ def _for_by_prevalence(run_dir, arm: str) -> plt.Figure:
                             10.0 ** np.ceil(np.log10(max(shown.max(), summary["epsilon"]))))
     for ax, letter in zip(axes.flat, "abcdefghi"):
         layout.panel_letter(ax, letter)
-    layout.legend_below(fig, axes[0, 0], [LABELS[m] for m in methods], [(delta_line, r"$\delta$")])
+    layout.legend_below(fig, axes[0, 0], [LABELS[m] for m in methods], [(delta_line, r"$\delta$"), *yardsticks])
     return fig
 
 
@@ -616,8 +661,8 @@ def fig_violation_by_window(run_dir) -> plt.Figure:
     fig, axes = plt.subplots(len(mixes) + 1, 1, figsize=(style.WIDTH_DOUBLE, 0.8 + 1.7 * (len(mixes) + 1)),
                              sharex=True)
     # one row per mix with the share of draws with FOR above epsilon in each real window and its 95% interval, the last
-    # row with the mean share of the window sessions dismissed at the first mix. a block that cannot be thinned to a mix
-    # has no point in its row
+    # row with the mean share of the window sessions dismissed at the first mix, and the best threshold up to pi_max. a
+    # block that cannot be thinned to a mix has no point in its row
     step = 0.15 / summary["blocks_per_year"]
     for k, method in enumerate(methods):
         for ax, mix in zip(axes, mixes):
@@ -626,6 +671,13 @@ def fig_violation_by_window(run_dir) -> plt.Figure:
                           **_line(method))
         g = data[(data["method"] == method) & (data["mix"] == mixes[0])].sort_values("position")
         axes[-1].plot(g["position"], g["dismissed_mean"], markersize=2.5, linewidth=1, **_line(method))
+    # the best threshold up to pi_max of each window, the yardstick of FORGE, absent from runs from before it
+    g = data[(data["method"] == methods[0]) & (data["mix"] == mixes[0])].sort_values("position")
+    yardstick = []
+    if "best_up_to_pi_max_dismissed" in g:
+        name, dash, label = BEST_LINES[0]
+        yardstick = [(axes[-1].plot(g["position"], g[f"{name}_dismissed"], color=style.INK, linestyle=dash,
+                                    linewidth=1, label=label)[0], label)]
     for ax, mix in zip(axes, mixes):
         ax.axhline(summary["delta"], color=style.GRAY, linestyle="--", linewidth=1, label=r"$\delta$")
         ax.set_ylim(-0.02, 1.02)
@@ -636,7 +688,7 @@ def fig_violation_by_window(run_dir) -> plt.Figure:
     axes[-1].set_ylabel(f"window sessions dismissed\n{MIX_LABELS[mixes[0]]}")
     axes[-1].set_xlabel(f"deployment year, each split into {summary['blocks_per_year']} blocks of equal session "
                         f"count, attack prevalence {style.percent(summary['main_prevalence'])}")
-    layout.legend_below(fig, axes[0], [LABELS[m] for m in methods])
+    layout.legend_below(fig, axes[0], [LABELS[m] for m in methods], yardstick)
     return fig
 
 
