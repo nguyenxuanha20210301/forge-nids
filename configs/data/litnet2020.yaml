@@ -6,3 +6,6 @@ dataset:
   window_freq: W
   # flows are ordered and assigned to windows by their end, when the flow record exists
   time_column: te
+  # captures whose benign flows the authors filtered, 455 flows in the scanning capture and only UDP in the UDP flood
+  # capture, so those flows stand for no natural traffic
+  filtered_captures: [scanning_spread, udp_flood]

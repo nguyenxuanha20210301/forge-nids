@@ -255,3 +255,96 @@ def anoshift_signal(tmp_path, monkeypatch, request):
                    row_group_size=1000)
     (out / "manifest.json").write_text(json.dumps({"fingerprint": anoshift.fingerprint(frame)}), encoding="utf-8")
     return SimpleNamespace(cfg=cfg, frame=frame)
+
+
+# captures of a processed LITNET-2020 table whose features carry the label, in time order, with the benign flows and
+# the attacks of each family and the seconds of the six minute capture in which each family attacks. udp flood holds
+# udp benign flows only, as in the published capture, and the two icmp families follow each other without overlap
+LITNET_SIGNAL_CAPTURES = [
+    ("udp_flood", datetime(2019, 3, 6, 21, 13, 58), 400, {"udp_flood": (1000, 0, 360)}),
+    ("reaper_worm", datetime(2019, 10, 2, 7, 48, 53), 7600, {"reaper_worm": (80, 20, 200)}),
+    ("syn_flood", datetime(2019, 12, 3, 2, 44, 56), 7400, {"syn_flood": (1600, 120, 360)}),
+    ("spam", datetime(2020, 1, 6, 2, 13, 59), 7400, {"spam_bot": (70, 0, 360)}),
+    ("icmp_flood", datetime(2020, 1, 31, 15, 34, 58), 7800, {"smurf": (700, 0, 150), "icmp_flood": (450, 200, 360)}),
+    ("red_worm", datetime(2020, 1, 30, 20, 31, 7), 7500, {"code_red_worm": (1300, 0, 360)}),
+]
+# how far each family's attacks sit from the benign flows in the features that carry the label, the pooled families
+# closest, so the low tail of the attack scores holds misses
+LITNET_SIGNAL_LEVELS = {"udp_flood": 0.62, "reaper_worm": 0.53, "syn_flood": 0.66, "spam_bot": 0.55, "smurf": 0.6,
+                        "icmp_flood": 0.56, "code_red_worm": 0.6}
+LITNET_PROTOCOLS = {"udp_flood": "UDP", "reaper_worm": "UDP", "syn_flood": "TCP", "spam_bot": "TCP", "smurf": "ICMP",
+                    "icmp_flood": "ICMP", "code_red_worm": "TCP"}
+
+
+def litnet_signal_frame(captures, seed):
+    # the processed v1 layout, rows of a capture sorted by te and row_id, row ids in a shuffled source order. the
+    # benign flows of each capture sit a little apart from those of the others, as captures of other days would
+    from forge.data import litnet2020
+
+    rng = np.random.default_rng(seed)
+    names = [name for name, _, _, _ in sorted(captures, key=lambda c: c[1])]
+    frames = []
+    for i, (name, start, benign, families) in enumerate(sorted(captures, key=lambda c: c[1])):
+        kind = ["benign"] * benign + [f for f, (n, _, _) in families.items() for _ in range(n)]
+        # benign flows over the whole capture, six minutes or the last second of an attack
+        last = max([360] + [hi for _, _, hi in families.values()])
+        second = np.r_[rng.integers(0, last + 1, benign),
+                       np.concatenate([rng.integers(lo, hi + 1, n) for n, lo, hi in families.values()])]
+        n = len(kind)
+        kind = np.array(kind)
+        attack = kind != "benign"
+        level = np.where(attack, [LITNET_SIGNAL_LEVELS.get(k, 0.0) for k in kind], 0.3 + 0.02 * (i % 3))
+
+        def signal():
+            # one noisy look at the level of every flow, each feature that carries the label takes its own
+            return np.clip(rng.normal(level, 0.15), 0, 1)
+
+        proto = np.where(attack, [LITNET_PROTOCOLS.get(k, "TCP") for k in kind],
+                         rng.choice(["TCP", "UDP", "ICMP"], n, p=[0.7, 0.25, 0.05]))
+        if name == "udp_flood":
+            proto[~attack] = "UDP"
+        te = (np.datetime64(start, "ms") + second.astype("timedelta64[s]")).astype("datetime64[ms]")
+        td = (10 * signal()).round(3)
+        frame = pd.DataFrame({
+            "ts": te - (td * 1000).astype("timedelta64[ms]"),
+            "te": te,
+            "label": attack.astype(np.int8),
+            "family": pd.Categorical(kind, categories=litnet2020.FAMILY_ORDER),
+            "capture": pd.Categorical([name] * n, categories=names),
+            "row_id": rng.permutation(n).astype(np.int32) + 1,
+            "td": td,
+            "proto": pd.Categorical(proto, categories=["ICMP", "TCP", "UDP"]),
+            "tcp_flags": np.where(attack & (rng.random(n) < 0.5), 2, rng.choice([2, 16, 18, 24, 27], n)).astype(
+                np.uint8),
+            "stos": rng.choice([0, 0, 40], n).astype(np.uint8),
+            "ipkt": np.maximum(1, np.round(np.exp(4 * signal()))).astype(np.int64),
+            "ibyt": np.maximum(40, np.round(np.exp(8 * signal()))).astype(np.int64),
+            "sp": np.where(rng.random(n) < 0.1, rng.integers(1, 1024, n), rng.integers(1024, 65536, n)).astype(
+                np.int32),
+            "dp": rng.choice([0, 25, 53, 80, 443, 2048], n).astype(np.int32),
+            "in_if": rng.integers(1, 5, n).astype(np.int32),
+            "out_if": rng.integers(1, 5, n).astype(np.int32),
+            "sas": rng.choice([0, 8764], n).astype(np.int64),
+            "das": rng.choice([0, 8764], n).astype(np.int64),
+            "exid": rng.choice([1, 2], n).astype(np.int16),
+        })
+        frames.append(frame.sort_values(["te", "row_id"], kind="stable", ignore_index=True))
+    return pd.concat(frames, ignore_index=True)
+
+
+@pytest.fixture
+def litnet_signal(tmp_path, monkeypatch, request):
+    # written where litnet2020.load finds it, with the manifest fields the experiments read. a test may pass other
+    # captures through indirect parametrization
+    from forge.data import litnet2020
+
+    monkeypatch.setenv("FORGE_STORAGE", str(tmp_path / "storage"))
+    cfg = load_config(configs_dir() / "data" / "litnet2020.yaml")
+    frame = litnet_signal_frame(getattr(request, "param", LITNET_SIGNAL_CAPTURES), seed=7)
+    out = litnet2020.processed_dir(cfg)
+    out.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pandas(frame, schema=litnet2020.SCHEMA, preserve_index=False), out / "flows.parquet",
+                   row_group_size=5000)
+    (out / "manifest.json").write_text(json.dumps({"time_column": "te", "fingerprint": litnet2020.fingerprint(frame)}),
+                                       encoding="utf-8")
+    return SimpleNamespace(cfg=cfg, frame=frame)

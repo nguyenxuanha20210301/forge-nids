@@ -1,0 +1,80 @@
+# RQ1 and E2 on LITNET-2020, the false omission rate and the dismissed share of each method in the last part of every
+# capture, its attack family thinned to a range of prevalences
+inherit: [../base.yaml, ../data/litnet2020.yaml]
+
+experiment:
+  name: e12_litnet_prevalence
+  module: litnet_prevalence
+
+split:
+  # shares of each capture's attacks in training, selection, calibration and test, cut in time order at the ranks of
+  # its attacks, so every part holds its share of the attacks and the benign flows fall where the cuts put them. a
+  # calibration share of 0.2 lets the four smallest families form one group of their own, see families below
+  shares: [0.35, 0.10, 0.20, 0.35]
+
+scorer:
+  # flow features of the processed table, sp_range is the source port reduced to its IANA range. the identifier-like
+  # columns in_if, out_if, sas, das and exid stay out
+  features: [td, proto, tcp_flags, stos, ipkt, ibyt, dp, sp_range]
+  categorical: [proto, tcp_flags]
+  # boosting rounds at most, training stops once the loss on the selection parts has not improved for early_stopping
+  # rounds
+  rounds: 1000
+  early_stopping: 50
+  params:
+    objective: binary
+    metric: binary_logloss
+    learning_rate: 0.1
+    num_leaves: 63
+    min_data_in_leaf: 100
+    feature_fraction: 0.9
+    bagging_fraction: 0.8
+    bagging_freq: 1
+    deterministic: true
+    force_col_wise: true
+    verbosity: -1
+
+certify:
+  epsilon: 0.001
+  delta: 0.05
+  # share of delta for the benign bound offline and for the bound on the window's dismissed share online, the rest
+  # goes to the miss rate bound of each attack family
+  delta_benign: 0.025
+  pi_max: 0.1
+  # the sequence starts at the loosest threshold that would pass with up to start_misses misses in every family, as
+  # long as it dismisses at most start_slack more than the first threshold that would pass with no miss
+  start_misses: 2
+  start_slack: 0.05
+  # thresholds at the benign quantiles j / (grid_size + 1) of the selection parts, and at the levels of grid_tail,
+  # where the misses of a scorer that restates the labelling rules may all lie
+  grid_size: 1000
+  grid_tail: [0.9995, 0.9998, 0.9999, 0.99995, 0.99998, 0.99999]
+  # a family is its own family only when its expected calibration attacks could certify, with no miss, a threshold
+  # dismissing this share of the benign flows, 1,364 attacks at the values above. the others are merged
+  family_floor: 0.3
+
+calibration:
+  # the calibration parts keep all their benign flows and have their attacks thinned to this prevalence
+  prevalence: 0.02
+  # balanced caps the attacks of every family at one count, so that only the largest families are thinned to reach the
+  # prevalence, natural thins every family by the same factor
+  mix: balanced
+
+deployment:
+  # each test part keeps all its benign flows and has its attacks thinned to each prevalence
+  prevalences: [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
+  # the mix of attack families among the attacks of a window, window for the families of its capture, calibration for
+  # the mix of the calibration set
+  mixes: [window, calibration]
+  # the prevalence of the figure over windows
+  main_prevalence: 0.1
+  # a real window above its capture's own prevalence keeps all its test attacks and has its benign flows subsampled,
+  # false leaves such a window out as e11 did
+  subsample_benign: true
+  # a window whose rate rests on fewer attacks of a family than this is flagged, and the drift figure leaves the
+  # family's miss rate out there, since a handful of attacks would decide it
+  min_family_attacks: 1000
+
+simulation:
+  methods: [forge_simplex, forge_pooled, forge_online, ltt_iid, conformal_fnr, fixed_sel]
+  draws: 1000

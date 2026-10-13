@@ -15,7 +15,8 @@ benign flows of the same minutes, so adding them would raise the prevalence of t
 download fetches the archives at a fixed commit and keeps a file only when its size and sha256 match the published
 ones. prepare checks the hashes again, reads the eleven captures and writes the flow times, the label, the attack
 family and the flow features into one parquet file sorted by time, inside a versioned folder with a readme and a
-manifest that record the source, the hashes, the counts and a content fingerprint.
+manifest that record the source, the hashes, the counts and a content fingerprint. capture_parts cuts each capture of
+that table in time order into the parts of an experiment, at the ranks of its attacks.
 """
 
 import hashlib
@@ -34,7 +35,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from forge import paths
-from forge.data import digest
+from forge.data import digest, splits
 from forge.runs import git_state
 
 PAPER = (
@@ -501,6 +502,76 @@ def load(cfg: dict, columns: list[str] | None = None) -> pd.DataFrame:
     if "family" in flows.columns:
         flows["family"] = flows["family"].cat.set_categories(FAMILY_ORDER)
     return flows
+
+
+def port_range(ports) -> np.ndarray:
+    # 0, the well known ports 1 to 1023, the registered ones 1024 to 49151 and the dynamic ones from 49152 on, the IANA
+    # ranges, so a port keeps what it says about the protocol and loses the value that can mark one host or tool run
+    ports = np.asarray(ports)
+    return np.select([ports == 0, ports < 1024, ports < 49152], [0, 1, 2], 3).astype(np.int8)
+
+
+def _blocks(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # first and end row of each run of equal values, every value in one run only
+    starts = np.flatnonzero(np.r_[True, values[1:] != values[:-1]])
+    if len(np.unique(values[starts])) != len(starts):
+        raise ValueError("the flows of a capture are not consecutive")
+    return starts, np.r_[starts[1:], len(values)]
+
+
+def capture_segments(capture, label, family, time) -> np.ndarray:
+    """the segment of every flow of a table written capture after capture in time order, numbered from 0 in that order.
+
+    a capture is one segment, unless the attacks of its families follow each other in time without overlap. it is then
+    cut at the first attack of each later family, so that a split inside a segment finds the attacks of every family in
+    every part. the benign flows between two families go with the earlier one, and those of the second in which a
+    family starts with that family.
+    """
+    capture, label, family, time = (np.asarray(v) for v in (capture, label, family, time))
+    segment = np.empty(len(capture), dtype=np.int32)
+    count = 0
+    for s, e in zip(*_blocks(capture)):
+        t = time[s:e]
+        if (t[1:] < t[:-1]).any():
+            raise ValueError(f"the flows of capture {capture[s]} are not in time order")
+        attack = label[s:e] == 1
+        spans = sorted((t[attack & (family[s:e] == f)].min(), t[attack & (family[s:e] == f)].max())
+                       for f in np.unique(family[s:e][attack]))
+        cuts = []
+        if len(spans) > 1 and all(a[1] < b[0] for a, b in zip(spans, spans[1:])):
+            cuts = [int(np.searchsorted(t, b[0], side="left")) for b in spans[1:]]
+        bounds = [0, *cuts, e - s]
+        for lo, hi in zip(bounds[:-1], bounds[1:]):
+            segment[s + lo:s + hi] = count
+            count += 1
+    return segment
+
+
+def capture_parts(capture, label, family, time, shares, min_share: float = 0.5) -> tuple[np.ndarray, np.ndarray]:
+    """the segment and the part of every flow, parts numbered 0, 1 and on in the order of shares.
+
+    each segment of capture_segments is cut at the ranks of its attacks, so every part holds its share of the segment's
+    attacks whatever their timing. a segment with several families, whose attacks overlap in time, stops the split when
+    one family holds less than min_share of its share in some part, since its parts would then not stand for it.
+    """
+    capture, label, family, time = (np.asarray(v) for v in (capture, label, family, time))
+    segment = capture_segments(capture, label, family, time)
+    part = np.empty(len(segment), dtype=np.int8)
+    shares = np.asarray(shares, dtype=float)
+    for s, e in zip(*_blocks(segment)):
+        attack = label[s:e] == 1
+        try:
+            part[s:e] = splits.attack_rank_parts(attack, shares)
+        except ValueError as err:
+            raise ValueError(f"capture {capture[s]}, {err}") from err
+        names = np.unique(family[s:e][attack])
+        for f in names if len(names) > 1 else []:
+            mine = attack & (family[s:e] == f)
+            held = np.bincount(part[s:e][mine], minlength=len(shares))
+            if (held < min_share * shares * mine.sum()).any():
+                raise ValueError(f"capture {capture[s]} holds {held.tolist()} attacks of {f} in its parts, less than "
+                                 f"{min_share} of the shares {shares.tolist()} in some part")
+    return segment, part
 
 
 def readme(m: dict) -> str:

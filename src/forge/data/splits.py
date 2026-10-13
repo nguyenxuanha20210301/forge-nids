@@ -36,6 +36,23 @@ def split_by_windows(windows: np.ndarray, roles: dict) -> dict:
     return {role: np.isin(windows, ids) for role, ids in roles.items()}
 
 
+def attack_rank_parts(attack, shares) -> np.ndarray:
+    # parts 0, 1 and on of rows in time order, cut at the rows of the attacks whose ranks reach each cumulative share,
+    # so every part holds its share of the attacks whatever their timing. the rows after the last attack of a part go
+    # with the next part. the products are rounded before the ceiling, since a sum of shares such as 0.35 + 0.1 + 0.2
+    # is a hair off in floating point
+    attack = np.asarray(attack, dtype=bool)
+    shares = np.asarray(shares, dtype=float)
+    if len(shares) < 2 or (shares <= 0).any() or not np.isclose(shares.sum(), 1):
+        raise ValueError(f"shares are {shares.tolist()}, expected two or more positive shares that sum to 1")
+    position = np.flatnonzero(attack)
+    ranks = np.ceil(np.round(np.cumsum(shares)[:-1] * len(position), 6)).astype(int)
+    if len(position) == 0 or ranks[0] < 1 or (np.diff(np.r_[ranks, len(position)]) < 1).any():
+        raise ValueError(f"{len(position)} attacks cannot give each of {len(shares)} parts with shares "
+                         f"{shares.tolist()} at least one")
+    return np.searchsorted(position[ranks - 1], np.arange(len(attack)), side="left")
+
+
 def order_blocks(groups, per_group: int) -> np.ndarray:
     # blocks of equal row count within each group, in row order, for data without clock time. the rows of a group must
     # sit together, and a group with fewer rows than blocks leaves some block numbers unused
