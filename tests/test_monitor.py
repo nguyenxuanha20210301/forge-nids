@@ -218,6 +218,10 @@ def test_first_alarm_and_certified_stretches_on_a_hand_example():
     lcb = np.array([[0, 0.5, 3, 9]])
     assert rule.first_alarm(lcb, positions, valid, eps)[0] == 2
     assert rule.first_alarm(lcb, positions, np.array([[True, True, False, False]]), eps)[0] == -1
+    # read from a floor, the event at 20 fires at 25 where its bound 3 still exceeds 2.5, and not at 40
+    assert rule.first_alarm(lcb, positions, valid, eps, start=25)[0] == 2
+    assert rule.first_alarm(lcb, positions, valid, eps, start=40)[0] == -1
+    assert rule.alarm_floor(1e-3) == 1000 and rule.alarm_floor(0.3) == 4
     ucb = np.array([[1.5, 4, 2.5, 0]])
     nxt = np.array([[10, 20, 101, 101]])
     # certified from the flow where eps times the count reaches the bound, 15, 40 and 25, until the next event
@@ -227,6 +231,8 @@ def test_first_alarm_and_certified_stretches_on_a_hand_example():
     assert length.tolist() == [[0, 0, 35, 0]]
     assert rule.state(np.array([0, 5, 0]), np.array([4, 20, 3]), np.array([30, 30, 30]), eps).tolist() == \
         ["running", "violation", "certified"]
+    assert rule.state(np.array([0, 5, 0]), np.array([4, 20, 3]), np.array([30, 30, 30]), eps, start=31).tolist() == \
+        ["running", "running", "certified"]
 
 
 def test_reading_waits_for_the_earliest_pending_label():

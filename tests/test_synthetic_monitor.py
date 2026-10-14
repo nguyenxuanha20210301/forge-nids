@@ -44,9 +44,11 @@ def test_judge_recomputes_what_the_events_say():
                 np.ones(1))
     lcb, ucb = tables.up_to(0, n_end, eps)
     alarmed = (out["flags"] & FLAGS["alarm"]) > 0
-    assert alarmed.mean() > 0.9
-    k = out["alarm_audited"][alarmed]
-    assert (lcb[k] > eps * out["alarm_time"][alarmed]).all() and (lcb[k - 1] <= eps * out["alarm_time"][alarmed]).all()
+    assert alarmed.mean() > 0.9 and (out["alarm_time"][alarmed] >= 1000).all()
+    # an alarm after the floor fires at the first audited attack whose bound exceeds eps times its position
+    event = alarmed & (out["alarm_time"] > 1000)
+    k, t = out["alarm_audited"][event], out["alarm_time"][event]
+    assert event.sum() > 0 and (lcb[k] > eps * t).all() and (lcb[k - 1] <= eps * t).all()
     # the leakage at the alarm is the count at its position, and with a delay the attacks of the delay join it
     assert (out["leak"][0][alarmed] == out["leak_at_alarm"][alarmed]).all()
     assert (out["leak"][1000] >= out["leak"][0]).all()
@@ -64,7 +66,11 @@ def test_adaptive_adversary_cannot_break_the_bounds():
     assert (out["miss_lower"] | out["miss_upper"]).mean() <= 0.05 + 0.03
     assert (out["attacked"] > 0).all() and (out["lag_at_end"] >= 5).all()
     alarmed = out["alarmed"]
-    assert (out["leak_at_alarm"][alarmed] >= out["leak_at_reading"][alarmed]).all()
+    assert alarmed.mean() > 0.5 and (out["alarm_time"][alarmed] >= 1000).all()
+    assert (out["leak_at_alarm"][alarmed] >= out["leak_at_check"][alarmed]).all()
+    # the bound of Theorem 3 holds at the last check that passed whenever the bounds cover
+    covered = ~(out["miss_lower"] | out["miss_upper"])
+    assert (out["leak_at_check"][alarmed & covered] <= out["bound"][alarmed & covered]).all()
 
 
 def test_e20_tables_and_figures(tmp_path):

@@ -3,9 +3,11 @@
 the lower bound moves only when an audited attack arrives, so the monitor reads the bounds at those moments and in
 between counts the dismissed flows. the state is certified while the upper bound stays at or below epsilon times the
 dismissed count, violation once the lower bound exceeds it, and running on C1 otherwise. at a violation the dismissal
-is switched off, so nothing more leaks, and a new certificate starts a new sequence. a label that arrives late holds
-the reading back, the sequence is read at the last flow before the earliest audit still waiting for its label, which
-keeps every bound valid under any delay at the price of what leaks until the reading catches up.
+is switched off, so nothing more leaks, and a new certificate starts a new sequence. the alarm is read from 1 / epsilon
+dismissed flows on, since before that one audited attack alone puts the lower bound above epsilon times the count. a
+label that arrives late holds the reading back, the sequence is read at the last flow before the earliest audit still
+waiting for its label, which keeps every bound valid under any delay at the price of what leaks until the reading
+catches up.
 
 the functions below take the events of many draws at once, one row per draw, the events padded on the right, and
 return one value per draw.
@@ -16,9 +18,18 @@ import numpy as np
 STATES = ("certified", "running", "violation")
 
 
-def first_alarm(lcb, positions, valid, eps):
-    # index of the first event at which the lower bound exceeds eps times the dismissed count, -1 when there is none
-    hit = valid & (lcb > eps * positions)
+def alarm_floor(eps: float) -> int:
+    # the dismissed count from which the rule reads the alarm, 1 / eps rounded up
+    return int(np.ceil(1 / eps))
+
+
+def first_alarm(lcb, positions, valid, eps, start: int = 0):
+    """index of the first event from which the lower bound exceeds eps times the dismissed count, -1 when there is none.
+
+    the alarm is read from start flows on, so an event before start fires at start if its bound exceeds eps times
+    start, and an event from start on fires at its own position.
+    """
+    hit = valid & (lcb > eps * np.maximum(positions, start))
     return np.where(hit.any(-1), hit.argmax(-1), -1)
 
 
@@ -36,11 +47,12 @@ def certified_stretches(ucb, positions, next_positions, valid, eps, stop=None):
     return np.where(length > 0, start, 0), length
 
 
-def state(lcb, ucb, n, eps):
-    # the state read from both bounds at n dismissed flows
+def state(lcb, ucb, n, eps, start: int = 0):
+    # the state read from both bounds at n dismissed flows, the alarm read from start flows on
+    n = np.asarray(n)
     out = np.full(np.shape(n), "running", dtype=object)
-    out[np.asarray(ucb) <= eps * np.asarray(n)] = "certified"
-    out[np.asarray(lcb) > eps * np.asarray(n)] = "violation"
+    out[np.asarray(ucb) <= eps * n] = "certified"
+    out[(np.asarray(lcb) > eps * n) & (n >= start)] = "violation"
     return out
 
 

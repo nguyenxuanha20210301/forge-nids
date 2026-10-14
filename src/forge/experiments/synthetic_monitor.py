@@ -18,10 +18,10 @@ what is counted for each scenario, audit policy, label delay and kind of sequenc
                      guarantee rests on the audits alone, and the share of the stream spent there
     audits           the audited attacks at the alarm and the expected audits of benign flows up to it
 
-the bounds move only at audited attacks and the alarm can only fire there, so a draw reduces to the positions of its
-audited attacks and the attack count at each, which keeps 10^4 draws per cell cheap. a second simulation walks flow by
-flow with an adversary who reads the past coins and the bounds before placing each attack, and with labels that arrive
-later for attacks than for benign flows, see adaptive in the config.
+the bounds move only at audited attacks and the alarm can fire only there or at the floor of the rule, so a draw
+reduces to the positions of its audited attacks and the attack count at each, which keeps 10^4 draws per cell cheap.
+a second simulation walks flow by flow with an adversary who reads the past coins and the bounds before placing each
+attack, and with labels that arrive later for attacks than for benign flows, see adaptive in the config.
 """
 
 import matplotlib.pyplot as plt
@@ -130,17 +130,25 @@ def judge(seq, tables, events, positions, counts, n_end, eps, delays, q_by_bin, 
     # the count at an event is the attack count there, and it reaches the next count less one before the next event
     miss_lower = (valid & (ev_g < lcb)).any(1)
     miss_upper = (valid & (next_g - 1 > ucb)).any(1)
-    r_alarm = rule.first_alarm(lcb, ev_pos, valid, eps)
+    floor = rule.alarm_floor(eps)
+    r_alarm = rule.first_alarm(lcb, ev_pos, valid, eps, floor)
     alarmed = r_alarm >= 0
     rows = np.arange(draws)
     at = np.maximum(r_alarm, 0)
-    p_alarm = np.where(alarmed, ev_pos[rows, at], -1)
-    g_alarm = np.where(alarmed, ev_g[rows, at], -1)
+    # an event before the floor fires at the floor, and the count and the audited attacks at the alarm are those up
+    # to the flow where it fires
+    p_alarm = np.where(alarmed, np.maximum(ev_pos[rows, at], floor), -1)
+    g_alarm = np.where(alarmed, (positions <= p_alarm[:, None]).sum(1), -1)
+    k_alarm = np.where(alarmed, (valid & (ev_pos <= p_alarm[:, None])).sum(1) - 1, -1)
     false_alarm = alarmed & (g_alarm <= eps * p_alarm)
     bound = np.full(draws, -1, dtype=np.int64)
-    if alarmed.any():
-        # the attack at the alarm itself comes on top of the bound on the flows before it
-        bound[alarmed] = leakage_bound(p_alarm[alarmed] - 1, lcb_high, ucb_low, eps) + 1
+    at_event = alarmed & (ev_pos[rows, at] > floor)
+    if at_event.any():
+        # the check at the flow before the alarm passed, so the attack at the alarm itself comes on top of the
+        # bound on the flows before it
+        bound[at_event] = leakage_bound(p_alarm[at_event] - 1, lcb_high, ucb_low, eps) + 1
+    # up to the floor no check was made, and every flow before it could be an attack
+    bound[alarmed & ~at_event] = floor
     stop = np.where(alarmed, p_alarm, n_end + 1)
     start, length = rule.certified_stretches(ucb, ev_pos, nxt, valid, eps, stop)
     certified = (length > 0).any(1)
@@ -153,13 +161,13 @@ def judge(seq, tables, events, positions, counts, n_end, eps, delays, q_by_bin, 
         leak[d] = (positions <= tau[:, None]).sum(1)
     # the audits up to the switch off, the audited attacks and the expected audits of benign flows by bin
     benign = np.maximum(mass[None, :] * until[:, None] - leak[0][:, None] * profile[None, :], 0)
-    audits = np.where(alarmed, r_alarm, valid.sum(1) - 1) + (benign * q_by_bin[None, :]).sum(1)
+    audits = np.where(alarmed, k_alarm, valid.sum(1) - 1) + (benign * q_by_bin[None, :]).sum(1)
     flags = (miss_lower * FLAGS["miscover_lower"] + miss_upper * FLAGS["miscover_upper"] + alarmed * FLAGS["alarm"]
              + false_alarm * FLAGS["false_alarm"]).astype(np.uint8)
-    return {"flags": flags, "alarm_time": p_alarm.astype(np.int64), "alarm_audited": r_alarm.astype(np.int64),
+    return {"flags": flags, "alarm_time": p_alarm.astype(np.int64), "alarm_audited": k_alarm.astype(np.int64),
             "leak_at_alarm": g_alarm.astype(np.int64), "bound": bound, "certified_time": certified_time,
             "certified_share": certified_share.astype(np.float32), "audits": audits.astype(np.float32),
-            "audits_per_million": (audits / until * 1e6).astype(np.float32),
+            "audits_per_million": (audits / until * 1e6).astype(np.float32), "until": until.astype(np.int64),
             "leak": {d: v.astype(np.int64) for d, v in leak.items()},
             "trace": {"ev_pos": ev_pos[0], "ev_g": ev_g[0], "ev_q": ev_q[0], "valid": valid[0], "lcb": lcb[0],
                       "ucb": ucb[0], "alarm_time": p_alarm[0]}}
@@ -169,8 +177,10 @@ def simulate_adaptive(rng, cell: dict, eps: float, q: float, lcb_t, ucb_t, draws
     """flow by flow, an adversary who reads the past coins and the bounds the monitor has read before placing each
     attack, and labels that arrive later for audited attacks than for audited benign flows.
 
-    lcb_t and ucb_t are the bounds by the number of audited attacks for uniform audits at probability q. returns the
-    per draw outcomes of the monitor on the stream of flows dismissed flows.
+    lcb_t and ucb_t are the bounds by the number of audited attacks for uniform audits at probability q. the alarm is
+    read from the floor of the rule on, and the bound of Theorem 3 is read at the last reading whose check passed,
+    so the leakage since then holds the attack that fires the alarm and those of the delay. returns the per draw
+    outcomes of the monitor on the stream of flows dismissed flows.
     """
     f = cell["rate"] * eps
     evade, skip = cell.get("evade_below"), bool(cell.get("skip_after_audit", False))
@@ -187,7 +197,9 @@ def simulate_adaptive(rng, cell: dict, eps: float, q: float, lcb_t, ucb_t, draws
     miss_upper = np.zeros(draws, dtype=bool)
     alarm_time = np.full(draws, -1, dtype=np.int64)
     leak_at_alarm = np.full(draws, -1, dtype=np.int64)
-    leak_at_reading = np.full(draws, -1, dtype=np.int64)
+    leak_at_check = np.full(draws, -1, dtype=np.int64)
+    checked = np.full(draws, -1, dtype=np.int64)
+    floor = rule.alarm_floor(eps)
     bound = np.full(draws, -1, dtype=np.int64)
     attacked = np.zeros(draws, dtype=np.int64)
     count_at = np.zeros((draws, flows + 1), dtype=np.int64)
@@ -213,17 +225,24 @@ def simulate_adaptive(rng, cell: dict, eps: float, q: float, lcb_t, ucb_t, draws
         pointer += (pointer < k) & (audited_at[rows, pointer] <= n - d_a)
         pending = audited_at[rows, pointer]
         n_read = rule.reading(n, d_b, d_a, pending)
-        fresh = (alarm_time < 0) & (lcb_t[pointer] > eps * n_read)
+        fresh = (alarm_time < 0) & (n_read >= floor) & (lcb_t[pointer] > eps * n_read)
         if fresh.any():
             alarm_time[fresh] = n
             leak_at_alarm[fresh] = count[fresh]
-            leak_at_reading[fresh] = count_at[rows[fresh], n_read[fresh]]
-            bound[fresh] = leakage_bound(n_read[fresh] - 1, lcb_t, ucb_t, eps) + 1
+            # before any check passed, the attacks up to the reading are at most the reading itself
+            had = checked[fresh] >= 0
+            b = n_read[fresh].copy()
+            if had.any():
+                b[had] = leakage_bound(checked[fresh][had], lcb_t, ucb_t, eps)
+            bound[fresh] = b
+            leak_at_check[fresh] = count_at[rows[fresh], np.where(had, checked[fresh], n_read[fresh])]
+        passed = (alarm_time < 0) & (n_read >= floor)
+        checked[passed] = n_read[passed]
     alarmed = alarm_time >= 0
     n_read_end = rule.reading(flows, d_b, d_a, audited_at[rows, pointer])
     false_alarm = alarmed & (leak_at_alarm <= eps * alarm_time)
     return {"miss_lower": miss_lower, "miss_upper": miss_upper, "alarmed": alarmed, "false_alarm": false_alarm,
-            "alarm_time": alarm_time, "leak_at_alarm": leak_at_alarm, "leak_at_reading": leak_at_reading,
+            "alarm_time": alarm_time, "leak_at_alarm": leak_at_alarm, "leak_at_check": leak_at_check,
             "bound": bound, "count": count, "attacked": attacked, "audited": k, "lag_at_end": flows - n_read_end}
 
 
@@ -331,7 +350,8 @@ def run(cfg: dict, run: runs.Run) -> None:
                         else:
                             rec.setdefault(field, []).append(value)
             done += d
-        run.log(f"scenario {sc['name']}, {n_end} dismissed flows, violation from flow {starts[sc['name']]}, "
+        onset = f"violation from flow {starts[sc['name']]}" if starts[sc['name']] > 0 else "no violation"
+        run.log(f"scenario {sc['name']}, {n_end} dismissed flows, {onset}, "
                 f"{'one stream' if fixed else 'a stream per draw'}, {draws} draws done")
 
     rows, saved = [], {}
@@ -356,7 +376,8 @@ def run(cfg: dict, run: runs.Run) -> None:
             **_with_prefix("miscover", share_with_interval(int((lower | upper).sum()), draws)),
             "alarm_rate": float(alarmed.mean()), "false_alarm_rate": float(false_alarm.mean()),
             "violation_start": start,
-            **_with_prefix("delay", _quantiles(rec["alarm_time"] - start, alarmed & (start > 0))),
+            **_with_prefix("delay", _quantiles(rec["alarm_time"] - start, alarmed & (start > 0)
+                                              & (rec["alarm_time"] >= start))),
             **_with_prefix("alarm_audited", _quantiles(rec["alarm_audited"], alarmed)),
             **_with_prefix("leak_at_alarm", _quantiles(rec["leak_at_alarm"], alarmed)),
             **_with_prefix("excess_at_alarm", _quantiles(rec["leak_at_alarm"] - eps * rec["alarm_time"], alarmed)),
@@ -366,6 +387,7 @@ def run(cfg: dict, run: runs.Run) -> None:
             "certified_rate": float((rec["certified_time"] >= 0).mean()),
             **_with_prefix("certified_time", _quantiles(rec["certified_time"], rec["certified_time"] >= 0)),
             "certified_share_mean": float(rec["certified_share"].mean()),
+            "audits_per_million": float(rec["audits"].sum() / rec["until"].sum() * 1e6),
             "audits_per_million_mean": float(rec["audits_per_million"].mean()),
         }
         for d in delays:
@@ -401,7 +423,7 @@ def run(cfg: dict, run: runs.Run) -> None:
                     f"excess at the alarm median {r['excess_at_alarm_median']:.0f} against the bound "
                     f"{r['bound_median']:.0f}, above the bound in {r['over_bound_rate']:.4f} of alarms, certified "
                     f"by audit in {r['certified_rate']:.4f} of draws after a median of {r['certified_time_median']:.0f} "
-                    f"flows, {r['audits_per_million_mean']:.0f} audits per million flows")
+                    f"flows, {r['audits_per_million']:.0f} audits per million flows up to the switch off")
 
     adaptive_rows = []
     main_seq = sequences[(main_rate, "uniform", "thinning")]
@@ -422,9 +444,9 @@ def run(cfg: dict, run: runs.Run) -> None:
             "alarm_rate": float(alarmed.mean()), "false_alarm_rate": float(out["false_alarm"].mean()),
             **_with_prefix("alarm_time", _quantiles(out["alarm_time"], alarmed)),
             **_with_prefix("leak_at_alarm", _quantiles(out["leak_at_alarm"], alarmed)),
-            **_with_prefix("leak_in_lag", _quantiles(out["leak_at_alarm"] - out["leak_at_reading"], alarmed)),
+            **_with_prefix("leak_in_lag", _quantiles(out["leak_at_alarm"] - out["leak_at_check"], alarmed)),
             **_with_prefix("bound", _quantiles(out["bound"], alarmed)),
-            "over_bound_rate": float((alarmed & (out["leak_at_reading"] > out["bound"])).sum() / max(alarmed.sum(), 1)),
+            "over_bound_rate": float((alarmed & (out["leak_at_check"] > out["bound"])).sum() / max(alarmed.sum(), 1)),
             "attacks_mean": float(out["attacked"].mean()), "audited_attacks_mean": float(out["audited"].mean()),
             "realized_for_mean": float(np.mean(out["count"] / int(ad["flows"]))),
             "lag_at_end_mean": float(out["lag_at_end"].mean()),
@@ -433,7 +455,8 @@ def run(cfg: dict, run: runs.Run) -> None:
         run.log(f"adaptive cell {cell['name']}, bounds left in {row['miscover_rate']:.4f} of draws, 95% interval "
                 f"{row['miscover_low']:.4f} to {row['miscover_high']:.4f}, alarm in {row['alarm_rate']:.4f} after a "
                 f"median of {row['alarm_time_median']:.0f} flows, leakage at the alarm median "
-                f"{row['leak_at_alarm_median']:.0f} of which {row['leak_in_lag_median']:.0f} since the reading, "
+                f"{row['leak_at_alarm_median']:.0f} of which {row['leak_in_lag_median']:.0f} since the last check that "
+                f"passed, "
                 f"realized FOR {row['realized_for_mean']:.5f}, mean attacks {row['attacks_mean']:.0f}")
     adaptive = pd.DataFrame(adaptive_rows)
     run.save_table(adaptive, "adaptive")
@@ -442,6 +465,7 @@ def run(cfg: dict, run: runs.Run) -> None:
 
     run.save_json({
         "epsilon": eps, "delta": delta, "delta_lower": delta_lower, "q_min": q_min,
+        "alarm_floor": rule.alarm_floor(eps),
         "lower_ratios": m["lower_ratios"], "upper_ratios": m["upper_ratios"], "kinds": kinds, "rates": rates,
         "main_rate": main_rate, "allocations": allocations, "delays": delays, "bins": bins,
         "bin_ratio": st["bin_ratio"], "scenarios": names, "fixed": st.get("fixed", []), "trace": st["trace"],
@@ -561,7 +585,7 @@ def fig_leakage_vs_bound(run_dir) -> plt.Figure:
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=45, ha="right")
     ax.set_xlabel("scenario")
-    ax.set_ylabel(r"attacks above $\varepsilon N$ at the switch off")
+    ax.set_ylabel(r"attacks above $\varepsilon N$")
     layout.legend_below(fig, ax, [f"excess at the alarm, {KIND_LABELS[k]}" for k in kinds], ncol=2)
     return fig
 
@@ -577,7 +601,9 @@ def fig_bounds_over_time(run_dir) -> plt.Figure:
     attacks = t["attacks"]
     color = style.color_for("forge_simplex")
     fig, ax = plt.subplots(figsize=(style.WIDTH_SINGLE, 2.6))
-    # the true count rises by one at every attack, the bounds and the estimate move at the audited attacks only
+    # the true count rises by one at every attack, the bounds and the estimate move at the audited attacks only,
+    # and the flows are drawn in millions
+    pos, attacks, n_end = pos / 1e6, attacks / 1e6, n_end / 1e6
     ax.step(np.r_[0, attacks, n_end], np.r_[0, np.arange(1, len(attacks) + 1), len(attacks)], where="post",
             color=style.INK, linewidth=1, label="attacks among the dismissed flows")
     ax.step(np.r_[pos, n_end], np.r_[np.arange(len(pos)) / float(t["rate"]), (len(pos) - 1) / float(t["rate"])],
@@ -585,15 +611,15 @@ def fig_bounds_over_time(run_dir) -> plt.Figure:
     ax.step(np.r_[pos, n_end], np.r_[lcb, lcb[-1]], where="post", color=color, linewidth=1.2, label="lower bound")
     ax.step(np.r_[pos, n_end], np.r_[ucb, ucb[-1]], where="post", color=color, linestyle="--", linewidth=1.2,
             label="upper bound")
-    ax.plot([0, n_end], [0, eps * n_end], color=style.GRAY, linestyle=":", linewidth=1,
+    ax.plot([0, n_end], [0, eps * n_end * 1e6], color=style.GRAY, linestyle=":", linewidth=1,
             label=r"$\varepsilon$ times the dismissed flows")
     if int(t["violation_start"]) > 0:
-        ax.axvline(int(t["violation_start"]), color=style.GRAY, linestyle="-.", linewidth=0.8)
+        ax.axvline(int(t["violation_start"]) / 1e6, color=style.GRAY, linestyle="-.", linewidth=0.8)
     if int(t["alarm_time"]) >= 0:
-        ax.axvline(int(t["alarm_time"]), color=color, linestyle="-.", linewidth=0.8)
+        ax.axvline(int(t["alarm_time"]) / 1e6, color=color, linestyle="-.", linewidth=0.8)
     ax.set_xlim(0, n_end)
     ax.set_ylim(0, 1.1 * max(float(ucb.max()), float(len(attacks))))
-    ax.set_xlabel("dismissed flows")
+    ax.set_xlabel("millions of dismissed flows")
     ax.set_ylabel("attacks")
     layout.legend_below(fig, ax, ["attacks among the dismissed flows", "estimate from the audits", "lower bound",
                                   "upper bound"], ncol=2)
