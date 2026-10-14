@@ -24,14 +24,19 @@ threshold policies, the streams.
 
 monitors, the arms on every stream, all reading the same audits.
     monitor          FORGE-Monitor, the audit martingale with uniform audits, the alarm read from 1 / epsilon sessions
-                     on, the dismissal switched off at the alarm
+                     on, the dismissal switched off at the alarm, one sequence for the whole deployment
+    monitor_year     the same with a new sequence at the start of every year, each at delta, the sequences counted,
+                     so the bounds speak of the count since the year began
+    monitor_block    the same with a new sequence at the start of every block, each at delta over the number of
+                     blocks, the counterpart of the per window audit
     none             the same stream without an alarm, so its leakage is the whole stream's
     window_audit     the uniform per window audit in the style of Manoharan, a Clopper-Pearson bound on the FOR of
                      each block from its audited sessions at delta over the number of blocks, read at the block's end
     naive            the running Horvitz Thompson estimate against epsilon times the dismissed count, no bound
 
 counted per policy, composition and arm. the share of draws with an alarm and with a false alarm, one whose count at
-the alarm is at or below epsilon times the dismissed count, the block and the session of the alarm, the first block
+the alarm is at or below epsilon times the dismissed count, both since the start of the sequence, the block and the
+session of the alarm, the first block
 whose population FOR at the policy's threshold exceeds epsilon and the first block end at which the realized count
 does, the attacks dismissed until the switch off against the whole stream's, the excess over epsilon times the
 sessions dismissed, the bound of Theorem 3 at the alarm, the share of draws in which the count leaves the bounds, the
@@ -73,11 +78,16 @@ POLICY_LABELS = {
 }
 POLICY_MARKERS = {"forge_simplex": "o", "forge_online": "v", "ltt_iid": "^", "conformal_fnr": "p", "fixed_sel": "X",
                   "recalibration": "D"}
-ARMS = ["monitor", "none", "window_audit", "naive"]
-ARM_LABELS = {"monitor": "FORGE-Monitor", "none": "no monitoring",
+ARMS = ["monitor", "monitor_year", "monitor_block", "none", "window_audit", "naive"]
+MONITORS = ["monitor", "monitor_year", "monitor_block"]
+ARM_LABELS = {"monitor": "FORGE-Monitor", "monitor_year": "FORGE-Monitor, a sequence per year",
+              "monitor_block": "FORGE-Monitor, a sequence per block", "none": "no monitoring",
               "window_audit": "per window audit, Clopper-Pearson", "naive": "running estimate, no bound"}
-ARM_MARKERS = {"monitor": "o", "window_audit": "s", "naive": "^", "none": "x"}
-ARM_SHORT = {"monitor": "FORGE-Monitor", "window_audit": "per window audit", "naive": "running estimate"}
+ARM_MARKERS = {"monitor": "o", "monitor_year": "D", "monitor_block": "v", "window_audit": "s", "naive": "^",
+               "none": "x"}
+ARM_SHORT = {"monitor": "FORGE-Monitor", "monitor_year": "FORGE-Monitor per year",
+             "monitor_block": "FORGE-Monitor per block", "window_audit": "per window audit",
+             "naive": "running estimate"}
 STATE_CODES = {name: code for code, name in enumerate(rule.STATES)}
 LOW, HIGH = 0.05, 0.95
 
@@ -204,8 +214,104 @@ def _first(mask):
     return np.where(mask.any(0), mask.argmax(0), -1)
 
 
-def judge_stream(tables: Tables, stream: dict, rate, eps: float, delta: float, q: float) -> dict:
-    """the four arms on the events of one stream, per draw."""
+def restarted_monitor(tables: Tables, stream: dict, eps: float, segments) -> dict:
+    """FORGE-Monitor with a new sequence at the start of every segment of windows, per draw.
+
+    segments gives the segment of each window, nondecreasing from 0. a sequence reads the audited attacks, the
+    sessions and the count since its segment began, so its bounds and its alarm speak of that segment, the alarm
+    switches the dismissal off for good, and the attacks dismissed until then are counted from the start of the
+    deployment. the bound of Theorem 3 on them adds the bound of every finished segment, read at its end, to the
+    bound of the segment of the alarm. the bounds hold with the level of one sequence per segment and with the level
+    times the segments over the deployment, and both failure shares are returned.
+    """
+    ev_pos, ev_count, ev_win, valid = stream["ev_pos"], stream["ev_count"], stream["ev_window"], stream["valid"]
+    offsets, attacks = stream["offsets"], stream["attacks"]
+    draws = ev_pos.shape[0]
+    w_count = attacks.shape[0]
+    rows = np.arange(draws)
+    segments = np.asarray(segments)
+    if segments.shape != (w_count,) or segments[0] != 0 or (np.diff(segments) < 0).any() or \
+            (np.diff(segments) > 1).any():
+        raise ValueError("segments must number the windows from 0 on without gaps, in order")
+    n_seg = int(segments[-1]) + 1
+    first = np.array([np.flatnonzero(segments == s)[0] for s in range(n_seg)])
+    ends = offsets[1:]
+    cum_attacks = np.concatenate([np.zeros((1, draws), dtype=np.int64), np.cumsum(attacks, axis=0)])
+    cum_audited = np.concatenate([np.zeros((1, draws), dtype=np.int64), np.cumsum(stream["audited_attacks"], axis=0)])
+    seg_start, seg_end = offsets[first], offsets[np.r_[first[1:], w_count]]
+    before = cum_attacks[first]
+    seg_total = cum_attacks[np.r_[first[1:], w_count]] - before
+    # the real events after a virtual event at the start of every segment, in the order of the stream
+    real = valid.copy()
+    real[:, 0] = False
+    pos = np.concatenate([seg_start.T, np.where(real, ev_pos, np.iinfo(np.int64).max)], axis=1)
+    count = np.concatenate([before.T, ev_count], axis=1)
+    seg = np.concatenate([np.broadcast_to(np.arange(n_seg), (draws, n_seg)), segments[np.maximum(ev_win, 0)]],
+                         axis=1)
+    win = np.concatenate([np.broadcast_to(first, (draws, n_seg)), ev_win], axis=1)
+    virtual = np.concatenate([np.ones((draws, n_seg), dtype=bool), np.zeros(ev_pos.shape, dtype=bool)], axis=1)
+    live = np.concatenate([np.ones((draws, n_seg), dtype=bool), real], axis=1)
+    order = np.argsort(pos, axis=1, kind="stable")
+    width = n_seg + int(real.sum(1).max())
+    pos, count, seg, win, virtual, live = (np.take_along_axis(a, order, axis=1)[:, :width]
+                                           for a in (pos, count, seg, win, virtual, live))
+    pos = np.where(live, pos, 0)
+    rank = np.cumsum(live & ~virtual, axis=1)
+    rank_at_start = rank[virtual].reshape(draws, n_seg)
+    k = np.where(live, rank - rank_at_start[rows[:, None], seg], 0)
+    n_in = np.where(live, pos - seg_start.T[rows[:, None], seg], 0)
+    c_in = np.where(live, count - before.T[rows[:, None], seg], 0)
+    length = (seg_end - seg_start).T
+    lcb_t, ucb_t = tables.up_to(int(k.max()), int(length.max()), eps)
+    lcb, ucb = lcb_t[k], ucb_t[k]
+    floor = rule.alarm_floor(eps)
+    hit = rule.first_alarm(lcb, n_in, live, eps, floor)
+    alarmed = hit >= 0
+    at = np.maximum(hit, 0)
+    seg_at = seg[rows, at]
+    p_in = np.where(alarmed, np.maximum(n_in[rows, at], floor), -1)
+    p = np.where(alarmed, seg_start.T[rows, seg_at] + p_in, -1)
+    g = np.where(alarmed, count[rows, at], -1)
+    g_in = np.where(alarmed, c_in[rows, at], -1)
+    total = cum_attacks[-1]
+    n_end = offsets[-1]
+    # the bound of the segment of the alarm, then those of the segments before it, each read at its end
+    at_event = alarmed & (n_in[rows, at] > floor)
+    bound = np.full(draws, -1, dtype=np.int64)
+    if at_event.any():
+        bound[at_event] = leakage_bound(p_in[at_event] - 1, lcb_t, ucb_t, eps) + 1
+    bound[alarmed & ~at_event] = floor
+    finished = np.where(length > 0, leakage_bound(np.maximum(length, 1), lcb_t, ucb_t, eps), 0)
+    earlier = (np.arange(n_seg)[None, :] < seg_at[:, None]) & alarmed[:, None]
+    bound = np.where(alarmed, bound + (finished * earlier).sum(1), -1)
+    # the count before the next event of the same segment, or the segment's whole count at its end
+    same = np.zeros(pos.shape, dtype=bool)
+    same[:, :-1] = live[:, 1:] & (seg[:, 1:] == seg[:, :-1])
+    nxt = np.where(same, np.concatenate([c_in[:, 1:], np.zeros((draws, 1), dtype=np.int64)], axis=1),
+                   seg_total.T[rows[:, None], seg] + 1)
+    bad_lower = live & ~virtual & (c_in < lcb)
+    bad_upper = live & (nxt - 1 > ucb)
+    failed = np.zeros((draws, n_seg), dtype=bool)
+    np.logical_or.at(failed, (rows[:, None].repeat(width, 1)[bad_lower | bad_upper], seg[bad_lower | bad_upper]),
+                     True)
+    # the state at every block end, read in the block's own segment
+    k_block = cum_audited[1:] - cum_audited[first[segments]]
+    n_block = ends - seg_start[segments]
+    certified = (ucb_t[k_block] <= eps * n_block) & (n_block > 0)
+    violation = alarmed & (p[None, :] <= ends)
+    state = np.where(violation, STATE_CODES["violation"],
+                     np.where(certified, STATE_CODES["certified"], STATE_CODES["running"])).astype(np.int8)
+    return {"alarmed": alarmed, "alarm_pos": p, "leak": np.where(alarmed, g, total),
+            "sessions": np.where(alarmed, p, n_end), "alarm_block": np.where(alarmed, win[rows, at], -1),
+            "false_alarm": alarmed & (g_in <= eps * p_in), "at_event": at_event, "bound": bound,
+            "over_bound": alarmed & (np.where(alarmed, g, 0) > bound), "miss_lower": bad_lower.any(1),
+            "miss_upper": bad_upper.any(1), "failed_sequences": failed, "sequences": n_seg, "state": state}
+
+
+def judge_stream(tables: Tables, stream: dict, rate, eps: float, delta: float, q: float,
+                 restarts: dict | None = None) -> dict:
+    """the arms on the events of one stream, per draw. restarts maps the name of a restarted monitor to its tables
+    and the segment of each window."""
     ev_pos, ev_count, ev_win, valid = stream["ev_pos"], stream["ev_count"], stream["ev_window"], stream["valid"]
     offsets, attacks = stream["offsets"], stream["attacks"]
     draws, width = ev_pos.shape
@@ -256,6 +362,8 @@ def judge_stream(tables: Tables, stream: dict, rate, eps: float, delta: float, q
     monitor["state"] = np.where(violation, STATE_CODES["violation"],
                                 np.where(certified, STATE_CODES["certified"], STATE_CODES["running"])).astype(np.int8)
     out["monitor"] = monitor
+    for name, (restart_tables, segments) in (restarts or {}).items():
+        out[name] = restarted_monitor(restart_tables, stream, eps, segments)
 
     naive_hit = valid & (k / q > eps * np.maximum(ev_pos, floor))
     out["naive"] = alarm_at(np.where(naive_hit.any(1), naive_hit.argmax(1), -1))
@@ -359,6 +467,11 @@ def run(cfg: dict, run: runs.Run) -> None:
 
     seq = Sequence(m["kind"], m["lower_ratios"], m["upper_ratios"], q, q, delta_lower, delta - delta_lower)
     tables = Tables(seq, q, q)
+    # a sequence per year keeps the level of one sequence, a sequence per block splits it over the blocks
+    years = np.unique(windows["year"].to_numpy(), return_inverse=True)[1]
+    per_block = Sequence(m["kind"], m["lower_ratios"], m["upper_ratios"], q, q, delta_lower / w_count,
+                         (delta - delta_lower) / w_count)
+    restarts = {"monitor_year": (tables, years), "monitor_block": (Tables(per_block, q, q), np.arange(w_count))}
     stream_seeds = np.random.SeedSequence(cfg["seed"]).spawn(len(compositions) * len(policies))
     rows, block_rows, saved, kept_trace = [], [], {}, None
     k_online = dep["mixes"].index("window")
@@ -407,7 +520,7 @@ def run(cfg: dict, run: runs.Run) -> None:
         for pj, p in enumerate(policies):
             rng = np.random.default_rng(stream_seeds[ci * len(policies) + pj])
             stream = audited_stream(rng, dismissed[p], rate[p], q)
-            out = judge_stream(tables, stream, rate[p], eps, delta, q)
+            out = judge_stream(tables, stream, rate[p], eps, delta, q, restarts)
             n_end = stream["offsets"][-1]
             total_windows = n_window.sum()
             held = dismissed[p] > 0
@@ -455,12 +568,15 @@ def run(cfg: dict, run: runs.Run) -> None:
                                                               r["sessions"] > 0)),
                     "audits_mean": float(out["audits"].mean()),
                 }
-                if arm == "monitor":
+                if arm in MONITORS:
                     either = r["miss_lower"] | r["miss_upper"]
                     row.update({
                         "miscover": int(either.sum()), **share_with_interval(int(either.sum()), draws, "miscover_"),
                         "miscover_lower_rate": float(r["miss_lower"].mean()),
                         "miscover_upper_rate": float(r["miss_upper"].mean()),
+                        "sequences": int(r.get("sequences", 1)),
+                        "miscover_sequence_rate": float(r["failed_sequences"].mean()) if "failed_sequences" in r
+                        else float(either.mean()),
                         **_with_prefix("bound", _quantiles(r["bound"], alarmed)),
                         "over_bound_rate": float(r["over_bound"].sum() / max(alarmed.sum(), 1)),
                         **{f"blocks_{name}_mean": float((r["state"] == code).sum(0).mean())
@@ -474,11 +590,12 @@ def run(cfg: dict, run: runs.Run) -> None:
             saved[key + "attacks"] = stream["attacks"]
             saved[key + "dismissed"] = dismissed[p]
             saved[key + "for_true"] = rate[p].astype(np.float32)
-            saved[key + "state"] = out["monitor"]["state"]
             for arm in arms:
                 saved[key + f"{arm}_alarm_pos"] = out[arm]["alarm_pos"]
                 saved[key + f"{arm}_leak"] = out[arm]["leak"]
-            saved[key + "monitor_bound"] = out["monitor"]["bound"]
+                if arm in MONITORS:
+                    saved[key + f"{arm}_state"] = out[arm]["state"]
+                    saved[key + f"{arm}_bound"] = out[arm]["bound"]
             if p == trace["policy"] and co["name"] == trace["composition"]:
                 kept_trace = {**out["trace"], "window_sessions": n_window, "years": windows["year"].to_numpy()}
             by_arm = {x["arm"]: x for x in rows if x["policy"] == p and x["composition"] == co["name"]}
@@ -496,9 +613,11 @@ def run(cfg: dict, run: runs.Run) -> None:
                         if x["alarm_rate"] > 0 else "never")
                 line += (f", {ARM_SHORT[arm]} alarm in {x['alarm_rate']:.4f} of draws, false in "
                          f"{x['false_alarm_rate']:.4f}, {when}, leakage median {x['leak_median']:.0f}")
-                if arm == "monitor":
+                if arm in MONITORS:
                     line += (f", bounds left in {x['miscover_rate']:.4f}, above the bound in {x['over_bound_rate']:.4f}"
                              f" of alarms, certified blocks {x['blocks_certified_mean']:.1f}")
+                if arm != "monitor" and arm in MONITORS:
+                    line += f", {x['sequences']} sequences, one left in {x['miscover_sequence_rate']:.4f}"
             run.log(line)
 
     claims = pd.DataFrame(rows)
@@ -507,14 +626,23 @@ def run(cfg: dict, run: runs.Run) -> None:
     run.save_table(windows, "windows")
     run.save_arrays("draws", **saved)
     run.save_arrays("trace", **kept_trace)
-    exceeds = False
-    if "monitor" in arms:
-        monitor = claims[claims["arm"] == "monitor"]
-        exceeds = bool((monitor["miscover_low"] > delta).any())
-        worst = monitor.loc[monitor["miscover_rate"].idxmax()]
-        run.log(f"FORGE-Monitor, largest share of draws leaving the bounds {worst['miscover_rate']:.4f} on "
+    exceeds = {}
+    for arm in [a for a in MONITORS if a in arms]:
+        g = claims[claims["arm"] == arm]
+        if arm == "monitor_year":
+            # a sequence per year holds its level per sequence, so the check reads the share of failing sequences
+            worst = g.loc[g["miscover_sequence_rate"].idxmax()]
+            exceeds[arm] = bool((g["miscover_sequence_rate"] > delta).any())
+            run.log(f"{ARM_SHORT[arm]}, largest share of sequences leaving the bounds "
+                    f"{worst['miscover_sequence_rate']:.4f} on {worst['policy']} at composition "
+                    f"{worst['composition']}, over {int(worst['sequences'])} sequences per draw, delta {delta}, "
+                    f"above delta {exceeds[arm]}")
+            continue
+        worst = g.loc[g["miscover_rate"].idxmax()]
+        exceeds[arm] = bool((g["miscover_low"] > delta).any())
+        run.log(f"{ARM_SHORT[arm]}, largest share of draws leaving the bounds {worst['miscover_rate']:.4f} on "
                 f"{worst['policy']} at composition {worst['composition']}, 95% interval {worst['miscover_low']:.4f} "
-                f"to {worst['miscover_high']:.4f}, delta {delta}, above delta beyond simulation noise {exceeds}")
+                f"to {worst['miscover_high']:.4f}, delta {delta}, above delta beyond simulation noise {exceeds[arm]}")
     run.save_json({
         "source": {**cfg["source"], "fingerprint": ssum["fingerprint"], "dataset": ssum["dataset"],
                    "processed_version": ssum["processed_version"], "draws": draws, "windows": w_count,
@@ -525,6 +653,7 @@ def run(cfg: dict, run: runs.Run) -> None:
         "alarm_floor": rule.alarm_floor(eps),
         "calibration_prevalence": pi_cal, "policies": policies, "arms": arms, "compositions": compositions,
         "trace": trace, "miscoverage_exceeds_delta": exceeds,
+        "restart_sequences": {"monitor_year": int(years.max()) + 1, "monitor_block": w_count},
     }, "summary")
 
     for name, draw in FIGURES.items():
@@ -538,7 +667,8 @@ def _policy_line(policy: str) -> dict:
     return {"color": color, "marker": POLICY_MARKERS[policy], "label": POLICY_LABELS[policy]}
 
 
-ARM_COLORS = {"monitor": style.COLORS[0], "window_audit": style.INK, "naive": style.GRAY, "none": style.GRAY}
+ARM_COLORS = {"monitor": style.COLORS[0], "monitor_year": style.SEQUENTIAL[8], "monitor_block": style.SEQUENTIAL[1],
+              "window_audit": style.INK, "naive": style.GRAY, "none": style.GRAY}
 
 
 def _arm_line(arm: str) -> dict:
@@ -622,7 +752,7 @@ def fig_alarm_by_policy(run_dir) -> plt.Figure:
     claims = runs.load_table(run_dir, "claims")
     summary = runs.load_json(run_dir, "summary")
     policies = [p for p in POLICIES if p in summary["policies"]]
-    arms = [a for a in ["monitor", "window_audit", "naive"] if a in summary["arms"]]
+    arms = [a for a in [*MONITORS, "window_audit", "naive"] if a in summary["arms"]]
     compositions = summary["compositions"]
     fig, axes = plt.subplots(2, len(compositions), figsize=(style.WIDTH_DOUBLE, 4.4), sharex=True, squeeze=False)
     x = np.arange(len(policies))
@@ -632,7 +762,7 @@ def fig_alarm_by_policy(run_dir) -> plt.Figure:
         g = claims[claims["composition"] == co["name"]]
         for k, arm in enumerate(arms):
             h = g[g["arm"] == arm].set_index("policy").reindex(policies)
-            xs = layout.dodge(x, k, len(arms), 0.2)
+            xs = layout.dodge(x, k, len(arms), 0.14)
             line = _arm_line(arm)
             axes[0, col].plot(xs, h["alarm_rate"], linestyle="none", markersize=4, **line)
             axes[0, col].plot(xs, h["false_alarm_rate"], linestyle="none", markersize=4, markerfacecolor="white",
@@ -661,7 +791,7 @@ def fig_leakage_by_policy(run_dir) -> plt.Figure:
     claims = runs.load_table(run_dir, "claims")
     summary = runs.load_json(run_dir, "summary")
     policies = [p for p in POLICIES if p in summary["policies"]]
-    arms = [a for a in ["monitor", "window_audit", "naive", "none"] if a in summary["arms"]]
+    arms = [a for a in [*MONITORS, "window_audit", "naive", "none"] if a in summary["arms"]]
     compositions = summary["compositions"]
     fig, axes = plt.subplots(1, len(compositions), figsize=(style.WIDTH_DOUBLE, 2.8), sharey=True, squeeze=False)
     axes = axes[0]
@@ -672,7 +802,7 @@ def fig_leakage_by_policy(run_dir) -> plt.Figure:
         g = claims[claims["composition"] == co["name"]]
         for k, arm in enumerate(arms):
             h = g[g["arm"] == arm].set_index("policy").reindex(policies)
-            xs = layout.dodge(x, k, len(arms), 0.18)
+            xs = layout.dodge(x, k, len(arms), 0.13)
             layout.points(ax, xs, h["leak_median"].clip(lower=1), h["leak_low"].clip(lower=1),
                           h["leak_high"].clip(lower=1), linestyle="none", **_arm_line(arm))
             if arm == "monitor":

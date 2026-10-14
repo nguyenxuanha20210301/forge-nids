@@ -5,7 +5,8 @@ from forge import experiments, runs
 from forge.certify.certificate import grid_from, plug_in
 from forge.config import load_config
 from forge.data.synthetic import draw_counts
-from forge.experiments.monitor_streams import ARMS, POLICIES, STATE_CODES, audited_stream, judge_stream, recalibrate
+from forge.experiments.monitor_streams import (ARMS, MONITORS, POLICIES, STATE_CODES, audited_stream, judge_stream,
+                                               recalibrate, restarted_monitor)
 from forge.monitor import rule
 from forge.monitor.sequence import Sequence, Tables
 from forge.paths import configs_dir
@@ -103,6 +104,21 @@ def test_judge_stream_finds_the_violating_window():
     naive = out["naive"]
     assert naive["alarmed"].mean() > 0.95 and (naive["alarm_pos"][naive["alarmed"]] >= floor).all()
     assert (out["audits"] > 0).all()
+    # one segment for the whole stream is the plain monitor, and a sequence per block reads each block on its own
+    one = restarted_monitor(Tables(seq, q, q), s, eps, np.array([0, 0, 0]))
+    for key in ["alarmed", "alarm_pos", "leak", "sessions", "alarm_block", "false_alarm", "bound", "miss_lower",
+                "miss_upper", "state"]:
+        assert np.array_equal(one[key], monitor[key]), key
+    assert one["sequences"] == 1
+    assert (one["failed_sequences"][:, 0] == (monitor["miss_lower"] | monitor["miss_upper"])).all()
+    per = restarted_monitor(Tables(seq, q, q), s, eps, np.array([0, 1, 2]))
+    assert per["sequences"] == 3 and per["failed_sequences"].shape == (draws, 3)
+    assert per["alarmed"].mean() > 0.9 and (per["alarm_block"][per["alarmed"]] >= 1).mean() > 0.95
+    starts = s["offsets"][per["alarm_block"].clip(0), rows]
+    assert (per["alarm_pos"][per["alarmed"]] - starts[per["alarmed"]] >= floor).all()
+    assert per["false_alarm"].mean() < 0.1 and per["over_bound"].mean() < 0.1
+    assert (per["leak"] <= total).all() and (per["failed_sequences"].mean(0) < 0.1).all()
+    assert (per["state"][2][per["alarmed"]] == STATE_CODES["violation"]).all()
 
 
 def test_e21_on_an_e11_run(anoshift_signal, tmp_path):
@@ -135,15 +151,21 @@ def test_e21_on_an_e11_run(anoshift_signal, tmp_path):
             # no monitoring leaks the whole stream, the monitor at most that, and every alarm comes from the floor on
             assert (draws[key + "none_leak"] == attacks.sum(0)).all()
             assert (draws[key + "monitor_leak"] <= draws[key + "none_leak"]).all()
-            for arm in ["monitor", "naive", "window_audit"]:
+            for arm in [*MONITORS, "naive", "window_audit"]:
                 pos = draws[key + f"{arm}_alarm_pos"]
                 assert ((pos == -1) | (pos >= floor)).all()
             # the per window audit alarms at a block end
             pos = draws[key + "window_audit_alarm_pos"]
             hit = pos >= 0
             assert all(pos[d] in ends[:, d] for d in np.flatnonzero(hit))
-            states = draws[key + "state"]
-            assert states.shape == (4, cfg11["simulation"]["draws"]) and set(np.unique(states)) <= {0, 1, 2}
+            for arm in MONITORS:
+                states = draws[key + f"{arm}_state"]
+                assert states.shape == (4, cfg11["simulation"]["draws"]) and set(np.unique(states)) <= {0, 1, 2}
+                assert (draws[key + f"{arm}_leak"] <= draws[key + "none_leak"]).all()
+    # a sequence per year over the two deployment years, one per block over the four blocks
+    sequences = claims.groupby("arm")["sequences"].first()
+    assert sequences["monitor"] == 1 and sequences["monitor_year"] == 2 and sequences["monitor_block"] == 4
+    assert summary["restart_sequences"] == {"monitor_year": 2, "monitor_block": 4}
     # the recalibration never tightens, so its mean threshold rises or stays from block to block
     for co, g in blocks[blocks["policy"] == "recalibration"].groupby("composition"):
         t = g.sort_values("window")["threshold_mean"].to_numpy()

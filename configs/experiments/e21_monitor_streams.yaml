@@ -37,8 +37,9 @@ audits:
   # the uniform audit probability of every dismissed session
   rate: 0.005
 
-# the monitors on every stream, all reading the same audits
-arms: [monitor, none, window_audit, naive]
+# the monitors on every stream, all reading the same audits, FORGE-Monitor with one sequence for the deployment, one
+# per year at the same delta and one per block at delta over the blocks
+arms: [monitor, monitor_year, monitor_block, none, window_audit, naive]
 
 simulation:
   # the draws are those of the source run, one stream per policy and composition. the figure over the stream shows
