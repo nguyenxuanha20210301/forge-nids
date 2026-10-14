@@ -1,0 +1,46 @@
+# RQ2 on AnoShift, FORGE-Monitor and the baselines that read the same audits on the dismissed streams of the thresholds
+# of e11 through the 72 blocks of 2010 to 2015 in order, how soon a violation is found and how much leaks before the
+# switch off
+inherit: [../base.yaml, ../data/anoshift.yaml]
+
+experiment:
+  name: e21_monitor_streams
+  module: monitor_streams
+
+# the e11 run whose grid, block histograms, calibration draws and thresholds the streams come from, in the runs
+# folder of the storage root
+source:
+  experiment: e11_anoshift_prevalence
+  run: 20261013-191305_c00f285
+
+# every window is the block thinned to the block's own mix of attack types at this prevalence, which must be one of
+# the prevalences of the source run
+compositions:
+  - {name: typical, prevalence: 0.02}
+  - {name: worst, prevalence: 0.1}
+
+# the threshold policies whose dismissed streams are monitored, the five of e11 and the recalibration of the fixed
+# threshold on the escalated labels after every block
+policies: [forge_simplex, forge_online, ltt_iid, conformal_fnr, fixed_sel, recalibration]
+
+monitor:
+  # the certificate's epsilon, delta_lower of delta for the lower bound and the rest for the upper one
+  epsilon: 0.001
+  delta: 0.05
+  delta_lower: 0.025
+  # the bets of each side as the sizes of violation they are best against, in units of epsilon
+  lower_ratios: [1.5, 2, 3, 5, 10, 30, 100]
+  upper_ratios: [0, 0.25, 0.5, 0.75]
+  kind: thinning
+
+audits:
+  # the uniform audit probability of every dismissed session
+  rate: 0.005
+
+# the monitors on every stream, all reading the same audits
+arms: [monitor, none, window_audit, naive]
+
+simulation:
+  # the draws are those of the source run, one stream per policy and composition. the figure over the stream shows
+  # the first draw of this policy and composition
+  trace: {policy: forge_simplex, composition: typical}

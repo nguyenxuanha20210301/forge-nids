@@ -245,6 +245,22 @@ class Sequence:
         return self.lower(k, stat["lower"]), self.upper(k, stat["upper"], k + 10 ** 12)
 
 
+class Tables:
+    # both bounds by the number of audited attacks at the least favorable audit probabilities of a policy, grown on
+    # demand, and the lower bound of a uniform policy reads from them as well
+    def __init__(self, seq: Sequence, q_high: float, q_low: float):
+        self.seq, self.q_high, self.q_low = seq, q_high, q_low
+        self.lcb = self.ucb = np.zeros(0)
+
+    def up_to(self, k_max: int, n_end: int, eps: float):
+        # the lower bound must pass eps n_end so that the bound of Theorem 3 can be read at any dismissed count
+        while len(self.lcb) <= k_max or self.lcb[-1] <= eps * n_end:
+            size = max(k_max, 2 * (len(self.lcb) - 1), 64)
+            self.lcb = self.seq.tables(self.q_high, size)[0]
+            self.ucb = self.seq.tables(self.q_low, size)[1]
+        return self.lcb, self.ucb
+
+
 def leakage_bound(n, lcb_table, ucb_table, eps):
     """the bound of Theorem 3 on the attacks among n dismissed flows while the lower bound has not raised an alarm.
 

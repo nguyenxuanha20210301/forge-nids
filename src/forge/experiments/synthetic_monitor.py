@@ -34,7 +34,7 @@ from forge.data.synthetic import attack_bins, attack_positions
 from forge.eval.metrics import share_with_interval
 from forge.monitor import rule
 from forge.monitor.audit import allocate, bin_profile
-from forge.monitor.sequence import KINDS, Sequence, leakage_bound
+from forge.monitor.sequence import KINDS, Sequence, Tables, leakage_bound
 from forge.viz import layout, style
 from forge.viz.export import save_figure
 
@@ -93,22 +93,6 @@ def audited_events(coins, positions, bins, q_by_bin, n_end: int):
     ev_q[row, at] = q_attack[row, col]
     valid[row, at] = True
     return ev_pos, ev_g, ev_q, valid
-
-
-class Tables:
-    # both bounds by the number of audited attacks at the least favorable audit probabilities of a policy, grown on
-    # demand, and the lower bound of a uniform policy reads from them as well
-    def __init__(self, seq: Sequence, q_high: float, q_low: float):
-        self.seq, self.q_high, self.q_low = seq, q_high, q_low
-        self.lcb = self.ucb = np.zeros(0)
-
-    def up_to(self, k_max: int, n_end: int, eps: float):
-        # the lower bound must pass eps n_end so that the bound of Theorem 3 can be read at any dismissed count
-        while len(self.lcb) <= k_max or self.lcb[-1] <= eps * n_end:
-            size = max(k_max, 2 * (len(self.lcb) - 1), 64)
-            self.lcb = self.seq.tables(self.q_high, size)[0]
-            self.ucb = self.seq.tables(self.q_low, size)[1]
-        return self.lcb, self.ucb
 
 
 def judge(seq, tables, events, positions, counts, n_end, eps, delays, q_by_bin, profile, mass):
