@@ -241,16 +241,18 @@ def restarted_monitor(tables: Tables, stream: dict, eps: float, segments) -> dic
     seg_start, seg_end = offsets[first], offsets[np.r_[first[1:], w_count]]
     before = cum_attacks[first]
     seg_total = cum_attacks[np.r_[first[1:], w_count]] - before
-    # the real events after a virtual event at the start of every segment, in the order of the stream
+    # the real events and a virtual event at the start of every segment, in the order of the stream. the real events
+    # come first in the concatenation, so an audited attack on the last session of a segment sorts before the virtual
+    # start of the next one and stays in its own segment
     real = valid.copy()
     real[:, 0] = False
-    pos = np.concatenate([seg_start.T, np.where(real, ev_pos, np.iinfo(np.int64).max)], axis=1)
-    count = np.concatenate([before.T, ev_count], axis=1)
-    seg = np.concatenate([np.broadcast_to(np.arange(n_seg), (draws, n_seg)), segments[np.maximum(ev_win, 0)]],
+    pos = np.concatenate([np.where(real, ev_pos, np.iinfo(np.int64).max), seg_start.T], axis=1)
+    count = np.concatenate([ev_count, before.T], axis=1)
+    seg = np.concatenate([segments[np.maximum(ev_win, 0)], np.broadcast_to(np.arange(n_seg), (draws, n_seg))],
                          axis=1)
-    win = np.concatenate([np.broadcast_to(first, (draws, n_seg)), ev_win], axis=1)
-    virtual = np.concatenate([np.ones((draws, n_seg), dtype=bool), np.zeros(ev_pos.shape, dtype=bool)], axis=1)
-    live = np.concatenate([np.ones((draws, n_seg), dtype=bool), real], axis=1)
+    win = np.concatenate([ev_win, np.broadcast_to(first, (draws, n_seg))], axis=1)
+    virtual = np.concatenate([np.zeros(ev_pos.shape, dtype=bool), np.ones((draws, n_seg), dtype=bool)], axis=1)
+    live = np.concatenate([real, np.ones((draws, n_seg), dtype=bool)], axis=1)
     order = np.argsort(pos, axis=1, kind="stable")
     width = n_seg + int(real.sum(1).max())
     pos, count, seg, win, virtual, live = (np.take_along_axis(a, order, axis=1)[:, :width]

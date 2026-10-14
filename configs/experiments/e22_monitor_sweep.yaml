@@ -1,0 +1,50 @@
+# RQ2 on AnoShift, the monitor of e21 swept around the rule of the paper, a sequence per year with uniform audits at
+# 0.5%, on the dismissed streams of the thresholds of e11 through the 72 blocks of 2010 to 2015
+inherit: [../base.yaml, ../data/anoshift.yaml]
+
+experiment:
+  name: e22_monitor_sweep
+  module: monitor_sweep
+
+# the e11 run the streams come from, as in e21
+source:
+  experiment: e11_anoshift_prevalence
+  run: 20261013-191305_c00f285
+
+compositions:
+  - {name: typical, prevalence: 0.02}
+  - {name: worst, prevalence: 0.1}
+
+policies: [forge_simplex, forge_online, ltt_iid, conformal_fnr, fixed_sel, recalibration]
+
+# the grid cut into this many bins at the benign quantiles of the selection year, the bins of the audit allocations
+bins: 10
+
+monitor:
+  epsilon: 0.001
+  delta: 0.05
+  delta_lower: 0.025
+  lower_ratios: [1.5, 2, 3, 5, 10, 30, 100]
+  upper_ratios: [0, 0.25, 0.5, 0.75]
+  kind: thinning
+
+# the main cell, uniform audits at this rate with this floor and a sequence per year
+audits:
+  rate: 0.005
+  allocation: uniform
+  floor: 0.0005
+  restart: year
+
+# one cell per entry, each one step from the main cell
+sweep:
+  rates: [0.001, 0.01, 0.02]
+  allocations:
+    - {allocation: sqrt, floor: 0.0005}
+    - {allocation: sqrt, floor: 0.0025}
+    - {allocation: proportional, floor: 0.0005}
+    - {allocation: proportional, floor: 0.0025}
+  kinds: [freedman]
+  restarts: [deployment, block, any]
+  # in dismissed sessions, about one and three days of the test files
+  delays: [25000, 75000]
+  targets: [step]
