@@ -1,0 +1,71 @@
+# Theorems 2 and 3 and Proposition 5 on synthetic streams of dismissed flows, how often the bounds on the number of
+# attacks among them fail, how fast a violation is found and how much leaks before the switch off
+inherit: [../base.yaml]
+
+experiment:
+  name: e20_synthetic_monitor
+  module: synthetic_monitor
+
+monitor:
+  epsilon: 0.001
+  delta: 0.05
+  # share of delta for the lower bound, which finds violations, the rest goes to the upper bound
+  delta_lower: 0.025
+  # floor of every audit probability
+  q_min: 0.0005
+  # the bets of each side as the sizes of violation they are best against, in units of epsilon, mixed with equal
+  # weights
+  lower_ratios: [1.5, 2, 3, 5, 10, 30, 100]
+  upper_ratios: [0, 0.25, 0.5, 0.75]
+  # thinning is the exact martingale of the audit coins, freedman the bound of the proposal from the Horvitz Thompson
+  # estimate, kept for comparison
+  kinds: [thinning, freedman]
+
+audits:
+  # mean audit probabilities, the first is the main one
+  rates: [0.005, 0.001, 0.01, 0.02]
+  # how the probability depends on the score bin of a flow, as the power of the attack share of the bin it follows,
+  # 0 for uniform audits, 0.5 for Proposition 5 and 1 for audits in proportion to the attack share
+  allocations: {uniform: 0, sqrt: 0.5, proportional: 1}
+  # delays between an audit and its label, in dismissed flows, the same for every audit
+  delays: [0, 10000, 100000]
+
+stream:
+  # the dismissed flows fall into this many score bins of equal size, and the share of the attacks in a bin grows by
+  # this factor from the lowest scores toward the threshold. the allocations read this profile as if estimated on the
+  # selection set
+  bins: 10
+  bin_ratio: 2.0
+  # a scenario is a list of segments, each with a number of flows and the probability that a flow is an attack in
+  # units of epsilon, or a ramp whose rate moves from start to end in equal steps
+  scenarios:
+    - {name: safe, segments: [{flows: 10000000, rate: 0.5}]}
+    - {name: edge, segments: [{flows: 10000000, rate: 1}]}
+    - {name: double, segments: [{flows: 10000000, rate: 2}]}
+    - {name: fivefold, segments: [{flows: 3000000, rate: 5}]}
+    - {name: tenfold, segments: [{flows: 1000000, rate: 10}]}
+    - {name: hundredfold, segments: [{flows: 200000, rate: 100}]}
+    - {name: gradual, ramp: {flows: 5000000, start: 0.5, end: 5, steps: 20}}
+    - {name: abrupt, segments: [{flows: 1000000, rate: 0.5}, {flows: 2000000, rate: 10}]}
+    - {name: burst, segments: [{flows: 1000000, rate: 0.5}, {flows: 100000, rate: 100}, {flows: 1000000, rate: 0.5}]}
+  # scenarios whose stream is drawn once and shared by every draw, so that only the coins vary
+  fixed: [double, burst]
+  # the scenario of the figure over time
+  trace: abrupt
+
+adaptive:
+  # flow by flow simulations at the main audit rate with uniform audits and the thinning kind. the adversary attacks
+  # with probability rate times epsilon while the lower bound the monitor has read stays at or below evade_below times
+  # epsilon times the dismissed count, and not at all otherwise, and with skip_after_audit it never attacks right
+  # after an audited flow. the labels of audited benign flows arrive benign_delay flows after the audit and those of
+  # audited attacks attack_delay flows after it
+  draws: 1000
+  flows: 1000000
+  cells:
+    - {name: evasive, rate: 10, evade_below: 0.5, skip_after_audit: true, benign_delay: 0, attack_delay: 0}
+    - {name: late_attack_labels, rate: 10, evade_below: null, skip_after_audit: false, benign_delay: 1000,
+       attack_delay: 100000}
+
+simulation:
+  draws: 10000
+  draws_per_chunk: 500

@@ -76,3 +76,40 @@ def sample_flows(rng, n: int, prevalence: float, shares, benign, families):
         chosen = family == k - 1
         scores[chosen] = rng.beta(*ab, size=chosen.sum())
     return scores, (family >= 0).astype(np.int8), family
+
+
+def attack_positions(rng, segments, draws: int):
+    """one based positions of the attacks in a stream of dismissed flows, for independent draws.
+
+    segments is a list of (flows, probability) pairs, and every flow of a segment is an attack with that probability
+    independently of the rest. the gaps between attacks are then geometric, so the positions come from cumulative
+    sums of gaps instead of one draw per flow. returns an int64 array (draws, m) sorted within a row and padded on the
+    right with the stream length plus one, and the number of attacks in each row.
+    """
+    n_end = int(sum(int(flows) for flows, _ in segments))
+    parts = []
+    start = 0
+    for flows, p in segments:
+        flows = int(flows)
+        if p < 0 or p > 1:
+            raise ValueError(f"an attack probability of {p} lies outside [0, 1]")
+        if p > 0 and flows > 0:
+            expected = flows * p
+            m = int(np.ceil(expected + 10 * np.sqrt(expected) + 20))
+            gaps = rng.geometric(p, size=(draws, m))
+            pos = np.cumsum(gaps, axis=1)
+            # a row whose gaps stop before the end of the segment would lose attacks, so it gets more gaps
+            while (pos[:, -1] <= flows).any():
+                more = rng.geometric(p, size=(draws, m))
+                pos = np.concatenate([pos, pos[:, -1:] + np.cumsum(more, axis=1)], axis=1)
+            parts.append(np.where(pos <= flows, pos + start, n_end + 1))
+        start += flows
+    if not parts:
+        return np.full((draws, 0), n_end + 1, dtype=np.int64), np.zeros(draws, dtype=np.int64)
+    positions = np.sort(np.concatenate(parts, axis=1), axis=1)
+    return positions, (positions <= n_end).sum(1)
+
+
+def attack_bins(rng, shape, probs) -> np.ndarray:
+    # the score bin of each attack, drawn from the share of attacks in each bin
+    return rng.choice(len(probs), size=shape, p=np.asarray(probs, dtype=float)).astype(np.int8)
