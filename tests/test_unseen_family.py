@@ -156,6 +156,10 @@ def test_e23_on_an_e12_run(litnet_signal, tmp_path):
             .sub(6).abs() < 1e-9).all()
     rates = claims[["alarm_in_unseen_rate", "alarm_before_unseen_rate", "alarm_after_unseen_rate"]].sum(axis=1)
     assert np.allclose(rates, claims["alarm_rate"])
+    # the share of alarms inside the window among the violating draws exists where some draw violates
+    given = claims["alarm_in_unseen_violated_rate"]
+    assert (given.isna() == (claims["unseen_violated_rate"] == 0)).all()
+    assert (given.dropna() >= 0).all() and (given.dropna() <= 1).all()
     assert summary["restart_sequences"] == {"monitor_window": 6, "monitor_any": 6}
     assert (claims.loc[claims["arm"] == "monitor_any", "sequences"] == 6).all()
     assert set(ARMS) >= set(arms)

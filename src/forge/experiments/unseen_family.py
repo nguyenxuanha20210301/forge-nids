@@ -25,11 +25,11 @@ monitors, the arms on every stream.
     naive            the running Horvitz Thompson estimate against epsilon times the dismissed count, no bound
 
 counted per unit, case, composition, policy and arm as in e21, and for the window of the held out family the share of
-draws alarmed inside it, before it and after it, the dismissed sessions of the window until the alarm, the attacks of
-the family dismissed until the switch off against all of them, and the population FOR and the miss rate of the family
-at the policy's threshold. per unit the scorer and the certificates, and per unit and window the AUC and the rates at
-the offline FORGE thresholds. figures bounds_over_time, for_by_family, alarm_by_family, leakage_by_family and
-leakage_by_arm.
+draws alarmed inside it, before it and after it, the same share among the draws in which the window violates epsilon,
+the dismissed sessions of the window until the alarm, the attacks of the family dismissed until the switch off against
+all of them, and the population FOR and the miss rate of the family at the policy's threshold. per unit the scorer
+and the certificates, and per unit and window the AUC and the rates at the offline FORGE thresholds. figures
+bounds_over_time, for_by_family, alarm_by_family, leakage_by_family and leakage_by_arm.
 """
 
 import matplotlib.pyplot as plt
@@ -509,6 +509,9 @@ def run(cfg: dict, run: runs.Run) -> None:
                                     _quantiles(out["onset_realized"] + 1, out["onset_realized"] >= 0))}
             ones = np.ones(draws, dtype=bool)
             h_u = held[w_u]
+            # the alarms inside the window read against the draws in which the window's population FOR exceeds
+            # epsilon, since a certificate drawn without the family may still escalate it in some draws
+            violated = h_u & (rate[w_u] > eps)
             unseen = {"unseen_segment": labels[w_u], "unseen_sessions": int(n_window[w_u]),
                       "unseen_subsampled": bool(subsampled[w_u]),
                       **_with_prefix("unseen_dismissed", _quantiles(dismissed[w_u], ones)),
@@ -543,6 +546,8 @@ def run(cfg: dict, run: runs.Run) -> None:
                     "alarm_in_unseen_rate": float(um["inside"].mean()),
                     "alarm_before_unseen_rate": float(um["before"].mean()),
                     "alarm_after_unseen_rate": float(um["after"].mean()),
+                    "alarm_in_unseen_violated_rate": float(um["inside"][violated].mean()) if violated.any()
+                    else np.nan,
                     **_with_prefix("detect_sessions", _quantiles(um["detect"], um["inside"])),
                     **_with_prefix("unseen_leak", _quantiles(um["leak"], ones)),
                     "unseen_leak_mean": float(um["leak"].mean()),
