@@ -126,21 +126,22 @@ def pool(frames: dict, keys: list[str], weight: str | None = None) -> pd.DataFra
             both[col] = both[col].astype(float)
     grouped = both.groupby(keys, sort=False, dropna=False)
     out = grouped.size().rename("seeds").reset_index()
+    stats = {}
     for col in both.columns:
         if col in keys or col == "seed":
             continue
         if grouped[col].nunique(dropna=False).le(1).all():
-            out[col] = grouped[col].first().to_numpy()
+            stats[col] = grouped[col].first().to_numpy()
         elif pd.api.types.is_numeric_dtype(both[col]):
-            out[f"{col}_median"] = grouped[col].median().to_numpy()
-            out[f"{col}_low"] = grouped[col].quantile(LOW).to_numpy()
-            out[f"{col}_high"] = grouped[col].quantile(HIGH).to_numpy()
+            stats[f"{col}_median"] = grouped[col].median().to_numpy()
+            stats[f"{col}_low"] = grouped[col].quantile(LOW).to_numpy()
+            stats[f"{col}_high"] = grouped[col].quantile(HIGH).to_numpy()
             if weight in both and _is_rate(col):
                 w = both[weight].astype(float)
                 num = (both[col].astype(float) * w).groupby([both[k] for k in keys], sort=False, dropna=False).sum()
                 den = w.groupby([both[k] for k in keys], sort=False, dropna=False).sum()
-                out[f"{col}_pooled"] = (num / den).to_numpy()
-    return out
+                stats[f"{col}_pooled"] = (num / den).to_numpy()
+    return pd.concat([out, pd.DataFrame(stats, index=out.index)], axis=1)
 
 
 def load_frames(selected: pd.DataFrame, name: str) -> dict:

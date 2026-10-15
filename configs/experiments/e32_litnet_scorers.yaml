@@ -1,0 +1,83 @@
+# RQ3 and E5 on LITNET-2020, the certified dismissed share of every scorer and combiner of proposal 6.2 by epsilon on
+# the reference windows of e12, with the split, the calibration sets and the windows of e12 and the scorer changed
+# alone. the scorer section of e12 stays the LightGBM of the comparison
+inherit: [e12_litnet_prevalence.yaml]
+
+experiment:
+  name: e32_litnet_scorers
+  module: scorer_comparison
+
+scorers:
+  base: [lightgbm, xgboost, extra_trees, mlp, logistic, isolation_forest]
+  combiners: [s_best, s_mean, s_stack, s_gate, s_tail, s_2d]
+  # the capped scorers train on at most cap rows of the training parts, every attack and a benign subsample drawn
+  # with the seed, since their cost on 12 million rows is tens of minutes each on a Colab CPU
+  cap: 3000000
+  capped: [extra_trees, mlp, logistic, isolation_forest]
+  xgboost:
+    # boosting rounds at most, training stops once the loss on the selection parts has not improved for
+    # early_stopping rounds, as for LightGBM
+    rounds: 1000
+    early_stopping: 50
+    params:
+      objective: binary:logistic
+      eval_metric: logloss
+      tree_method: hist
+      eta: 0.1
+      max_depth: 8
+      min_child_weight: 100
+      subsample: 0.8
+      colsample_bytree: 0.9
+      max_cat_to_onehot: 8
+      verbosity: 0
+  extra_trees:
+    n_estimators: 40
+    min_samples_leaf: 20
+    max_features: sqrt
+  mlp:
+    # two hidden layers on the dense features, adam, stopped early on a tenth of its training rows
+    hidden: [64, 64]
+    batch_size: 1024
+    max_iter: 20
+    learning_rate: 0.001
+    patience: 3
+  logistic:
+    c: 1.0
+    max_iter: 200
+  isolation_forest:
+    # fit on the benign rows of the capped subsample, 256 of them per tree
+    n_estimators: 100
+    max_samples: 256
+  stack:
+    c: 1.0
+    max_iter: 200
+  gate:
+    # adam steps on batches of the first part of the selection parts
+    steps: 3000
+    batch: 4096
+    learning_rate: 0.01
+  tail:
+    # every batch holds batch_benign benign rows and batch_family rows of every family. the threshold is the benign
+    # quantile at benign_share of the batch, null takes the share the best base scorer dismisses safely on the fitting
+    # part. temperature softens the miss count, family_temperature the maximum over families, weight scales the binary
+    # cross entropy that keeps the combiner a scorer of the label
+    steps: 3000
+    batch_benign: 4096
+    batch_family: 256
+    temperature: 0.5
+    family_temperature: 0.1
+    weight: 0.1
+    learning_rate: 0.01
+    benign_share: null
+
+comparison:
+  epsilons: [0.0001, 0.0005, 0.001, 0.005, 0.01]
+  main_epsilon: 0.001
+  # the share of the selection part of every capture, first in time, that fits the combiners and the low tail target.
+  # the rest gives every scorer its grid and picks S-best
+  fit_share: 0.5
+  # the miss rate of the calibration attacks at which the benign share dismissed is read, pooled and per family
+  miss_rate: 0.01
+  ece_bins: 15
+  # the logits of every base scorer on the selection, calibration and test parts go to scores.npz
+  save_scores: true

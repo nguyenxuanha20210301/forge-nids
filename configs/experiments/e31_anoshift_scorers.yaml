@@ -1,0 +1,76 @@
+# RQ3 and E5 on AnoShift, the certified dismissed share of every scorer and combiner of proposal 6.2 by epsilon on
+# the reference windows of e11, with the split, the calibration sets and the windows of e11 and the scorer changed
+# alone. the scorer section of e11 stays the LightGBM of the comparison
+inherit: [e11_anoshift_prevalence.yaml]
+
+experiment:
+  name: e31_anoshift_scorers
+  module: scorer_comparison
+
+# the windows come from the main period alone, where e11 has its reference windows
+split:
+  deployment: [2010, 2010]
+
+scorers:
+  base: [lightgbm, xgboost, extra_trees, mlp, logistic, isolation_forest]
+  combiners: [s_best, s_mean, s_stack, s_gate, s_tail, s_2d]
+  # the capped scorers train on at most cap rows of the training years, every attack and a benign subsample drawn
+  # with the seed. the training years of AnoShift hold about 3 million sessions, so the cap hardly binds here
+  cap: 3000000
+  capped: [extra_trees, mlp, logistic, isolation_forest]
+  xgboost:
+    rounds: 1000
+    early_stopping: 50
+    params:
+      objective: binary:logistic
+      eval_metric: logloss
+      tree_method: hist
+      eta: 0.1
+      max_depth: 8
+      min_child_weight: 100
+      subsample: 0.8
+      colsample_bytree: 0.9
+      max_cat_to_onehot: 8
+      verbosity: 0
+  extra_trees:
+    n_estimators: 40
+    min_samples_leaf: 20
+    max_features: sqrt
+  mlp:
+    hidden: [64, 64]
+    batch_size: 1024
+    max_iter: 20
+    learning_rate: 0.001
+    patience: 3
+  logistic:
+    c: 1.0
+    max_iter: 200
+  isolation_forest:
+    n_estimators: 100
+    max_samples: 256
+  stack:
+    c: 1.0
+    max_iter: 200
+  gate:
+    steps: 3000
+    batch: 4096
+    learning_rate: 0.01
+  tail:
+    steps: 3000
+    batch_benign: 4096
+    batch_family: 256
+    temperature: 0.5
+    family_temperature: 0.1
+    weight: 0.1
+    learning_rate: 0.01
+    benign_share: null
+
+comparison:
+  epsilons: [0.0001, 0.0005, 0.001, 0.005, 0.01]
+  main_epsilon: 0.001
+  # the share of the selection year, first in time, that fits the combiners and the low tail target. the rest gives
+  # every scorer its grid and picks S-best
+  fit_share: 0.5
+  miss_rate: 0.01
+  ece_bins: 15
+  save_scores: true
