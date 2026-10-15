@@ -1,0 +1,54 @@
+# RQ4 on LITNET-2020, FORGE-Monitor against an attack family the scorer and the certificate never saw. for each family
+# the scorer and the certificates of e12 are refit without its attacks and deployed on the test parts of the captures
+# with benign flows in capture order, the known windows at one prevalence and the family's own window at another,
+# against the same windows with the family known
+inherit: [../base.yaml, ../data/litnet2020.yaml]
+
+experiment:
+  name: e23_unseen_family
+  module: unseen_family
+
+# the e12 run whose split, scorer settings, certificate settings and seeds every unit follows, in the runs folder of
+# the storage root. its real windows, drawn again with its seeds, are the control with every family known, and check
+# compares the control's thresholds and window sizes with the ones the run saved
+source:
+  experiment: e12_litnet_prevalence
+  run: 20261013-224115_8502bf0
+  check: true
+
+# the families held out one at a time, the families of one capture with benign flows named as the cuts table of e12
+# joins them. the scanning and udp flood captures have no benign flows and no window, so their families stay known
+units: [reaper_worm, fragmentation, syn_flood, spam_bot, http_flood, blaster_worm, land, code_red_worm,
+        smurf+icmp_flood]
+
+# every window is its test part thinned to a prevalence as a real window of e12, the known windows at known and the
+# window of the held out family at unseen, both among the prevalences of the source run
+compositions:
+  - {name: typical, known: 0.02, unseen: 0.02}
+  - {name: worst, known: 0.02, unseen: 0.1}
+
+# the threshold policies whose dismissed streams are monitored, as in e21
+policies: [forge_simplex, forge_online, ltt_iid, conformal_fnr, fixed_sel, recalibration]
+
+monitor:
+  # the certificate's epsilon, delta_lower of delta for the lower bound and the rest for the upper one
+  epsilon: 0.001
+  delta: 0.05
+  delta_lower: 0.025
+  # the bets of each side as the sizes of violation they are best against, in units of epsilon
+  lower_ratios: [1.5, 2, 3, 5, 10, 30, 100]
+  upper_ratios: [0, 0.25, 0.5, 0.75]
+  kind: thinning
+
+audits:
+  # the uniform audit probability of every dismissed flow
+  rate: 0.005
+
+# the monitors on every stream, all reading the same audits, FORGE-Monitor with one sequence for the deployment, one
+# per window at delta over the windows and one started at every window at delta over the windows
+arms: [monitor, monitor_window, monitor_any, none, window_audit, naive]
+
+simulation:
+  # the draws are those of the source run, one stream per unit, case, composition and policy. the figure over the
+  # stream shows the first draw of this unit, composition and policy with the family unseen
+  trace: {unit: land, composition: typical, policy: forge_simplex}

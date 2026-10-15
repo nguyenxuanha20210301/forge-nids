@@ -152,6 +152,38 @@ def score_rows(booster, enc: Encoder, flows: pd.DataFrame, rows: np.ndarray) -> 
     return out
 
 
+def split_flows(flows: pd.DataFrame, shares_split, filtered: set) -> dict:
+    """the segment and the part of every flow of the processed table, which flows are kept, the attack families present
+    and the class code of every flow, 0 for a benign flow and 1 and up for the families in their order.
+
+    the benign flows of the filtered captures are left out everywhere and their attacks stay.
+    """
+    label = flows["label"].to_numpy()
+    segment, part = litnet2020.capture_parts(np.asarray(flows["capture"]), label, np.asarray(flows["family"]),
+                                             flows["te"].to_numpy(), shares_split)
+    capture_codes = flows["capture"].cat.codes.to_numpy()
+    left_out = [i for i, name in enumerate(flows["capture"].cat.categories) if name in filtered]
+    kept = (label == 1) | ~np.isin(capture_codes, left_out)
+    present = set(flows.loc[label == 1, "family"].astype(str))
+    families = [f for f in litnet2020.ATTACK_FAMILIES if f in present]
+    remap = np.zeros(len(litnet2020.FAMILY_ORDER), dtype=np.int8)
+    for k, f in enumerate(families):
+        remap[litnet2020.FAMILY_ORDER.index(f)] = k + 1
+    return {"label": label, "segment": segment, "part": part, "kept": kept, "families": families,
+            "code": remap[flows["family"].cat.codes.to_numpy()]}
+
+
+def fit_scorer(flows: pd.DataFrame, label: np.ndarray, train: np.ndarray, sel: np.ndarray, sc: dict, seed: int):
+    # the scorer sees the rows of train, and the rows of sel only to stop. returns the booster, the encoder fitted on
+    # the training rows and the loss on the selection rows at the best round
+    features = sc["features"]
+    categorical = [f for f in features if f in sc["categorical"]]
+    enc = Encoder([f for f in features if f not in categorical], categorical).fit(flows.iloc[train])
+    booster = boosting.fit(enc.transform(flows.iloc[train]), label[train], enc.transform(flows.iloc[sel]), label[sel],
+                           sc["params"], sc["rounds"], sc["early_stopping"], seed, enc.columns, enc.categorical_index)
+    return booster, enc, float(next(iter(booster.best_score["selection"].values())))
+
+
 def segment_table(flows: pd.DataFrame, segment: np.ndarray, part: np.ndarray, filtered: set) -> pd.DataFrame:
     # one row per segment and part, with the first and last flow of the part, the cut points of the split
     label = flows["label"].to_numpy()
@@ -200,20 +232,10 @@ def run(cfg: dict, run: runs.Run) -> None:
             f"{int(label.sum())} attacks, {flows['capture'].nunique()} captures")
 
     # the parts inside each capture, then the benign flows of the filtered captures leave every part
-    segment, part = litnet2020.capture_parts(np.asarray(flows["capture"]), label, np.asarray(flows["family"]),
-                                             flows["te"].to_numpy(), shares_split)
+    split = split_flows(flows, shares_split, filtered)
+    segment, part, kept, families, code = (split[key] for key in ("segment", "part", "kept", "families", "code"))
     cuts = segment_table(flows, segment, part, filtered)
     run.save_table(cuts, "cuts")
-    capture_codes = flows["capture"].cat.codes.to_numpy()
-    left_out = [i for i, name in enumerate(flows["capture"].cat.categories) if name in filtered]
-    kept = (label == 1) | ~np.isin(capture_codes, left_out)
-    present = set(flows.loc[label == 1, "family"].astype(str))
-    families = [f for f in litnet2020.ATTACK_FAMILIES if f in present]
-    remap = np.zeros(len(litnet2020.FAMILY_ORDER), dtype=np.int8)
-    for k, f in enumerate(families):
-        remap[litnet2020.FAMILY_ORDER.index(f)] = k + 1
-    # 0 for a benign flow, 1 and up for the attack families in the order of families
-    code = remap[flows["family"].cat.codes.to_numpy()]
     segments = cuts.drop_duplicates("segment").reset_index(drop=True)
     for g in segments.itertuples():
         own = cuts[cuts["segment"] == g.segment]
@@ -225,14 +247,9 @@ def run(cfg: dict, run: runs.Run) -> None:
 
     # the scorer sees the training parts, and the selection parts only to stop
     features = sc["features"]
-    categorical = [f for f in features if f in sc["categorical"]]
     train = np.flatnonzero((part == 0) & kept)
     sel = np.flatnonzero((part == 1) & kept)
-    enc = Encoder([f for f in features if f not in categorical], categorical).fit(flows.iloc[train])
-    booster = boosting.fit(enc.transform(flows.iloc[train]), label[train], enc.transform(flows.iloc[sel]), label[sel],
-                           sc["params"], sc["rounds"], sc["early_stopping"], cfg["seed"], enc.columns,
-                           enc.categorical_index)
-    sel_loss = float(next(iter(booster.best_score["selection"].values())))
+    booster, enc, sel_loss = fit_scorer(flows, label, train, sel, sc, cfg["seed"])
     (run.results / "models").mkdir()
     booster.save_model(str(run.results / "models" / "scorer.txt"), num_iteration=booster.best_iteration)
     used = np.flatnonzero((part >= 1) & kept)
