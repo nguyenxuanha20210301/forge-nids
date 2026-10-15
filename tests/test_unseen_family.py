@@ -166,3 +166,34 @@ def test_e23_on_an_e12_run(litnet_signal, tmp_path):
     for name in module.FIGURES:
         assert (run.dir / "figures" / f"{name}.png").exists() and (run.dir / "figures" / f"{name}.pdf").exists()
     assert "largest share of draws leaving the bounds" in log
+
+
+def test_e23_with_its_own_seed_refits_everything_and_is_e12_at_that_seed(litnet_signal, tmp_path):
+    # the source run has seed 0. with seed 1 the scorer, the calibration sets, the windows and the coins take seed 1,
+    # the control is not checked against the source run, and its thresholds are those of e12 at seed 1
+    cfg12 = load_config(configs_dir() / "experiments" / "e12_litnet_prevalence.yaml", OVERRIDES)
+    run12, _ = run_e12(cfg12, None)
+    cfg = load_config(configs_dir() / "experiments" / "e23_unseen_family.yaml",
+                      [f"source.run={run12.run_id}", "monitor.epsilon=0.05", "audits.rate=0.2", "units=[syn_flood]",
+                       "compositions=[{name: typical, known: 0.05, unseen: 0.05}]",
+                       "simulation.trace={unit: syn_flood, composition: typical, policy: forge_simplex}",
+                       "policies=[forge_simplex, forge_online]", "arms=[monitor, none]", "seed=1"])
+    run = Run(cfg, root=tmp_path / "runs")
+    experiments.get("unseen_family").run(cfg, run)
+    run.finish()
+    log = (run.dir / "log.txt").read_text()
+    summary = runs.load_json(run.dir, "summary")
+    assert "seed 1 differs from the source run's 0" in log and not summary["source_checked"]
+    assert summary["seed"] == 1 and summary["source_seed"] == 0
+    hist = runs.load_arrays(run.dir, "histograms")
+    source = runs.load_arrays(run12.dir, "draws")
+    assert not np.array_equal(hist["all_known|forge_simplex_index"], source["forge_simplex_index"]) or \
+        not np.array_equal(hist["all_known|counts"], source["counts"])
+    cfg12_1 = load_config(configs_dir() / "experiments" / "e12_litnet_prevalence.yaml", OVERRIDES + ["seed=1"])
+    run12_1, _ = run_e12(cfg12_1, tmp_path / "e12")
+    twin = runs.load_arrays(run12_1.dir, "draws")
+    assert np.array_equal(hist["all_known|counts"], twin["counts"])
+    for p in ["forge_simplex", "ltt_iid", "conformal_fnr", "fixed_sel"]:
+        assert np.array_equal(hist[f"all_known|{p}_index"], twin[f"{p}_index"])
+    units = runs.load_table(run.dir, "units")
+    assert units.loc[0, "best_iteration"] == runs.load_json(run12_1.dir, "scorer")["best_iteration"]

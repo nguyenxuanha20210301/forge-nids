@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from forge import paths
 from forge.config import save_config
@@ -116,6 +117,25 @@ class Run:
         self._write_meta()
         self.log(f"run {status} in {self.meta['seconds']} s, saved to {self.dir}")
         self._log.close()
+
+
+def run_dirs(experiment: str, root=None) -> list[Path]:
+    # the run folders of an experiment, those holding a meta.json, sorted by run id and so by start time
+    base = (Path(root) if root else paths.runs_dir()) / experiment
+    if not base.is_dir():
+        return []
+    return sorted(p for p in base.iterdir() if (p / "meta.json").is_file())
+
+
+def load_meta(run_dir) -> dict:
+    with open(Path(run_dir) / "meta.json", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_run_config(run_dir) -> dict:
+    # the resolved config the run saved, which holds no inherit key
+    with open(Path(run_dir) / "config.yaml", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 def load_table(run_dir, name: str) -> pd.DataFrame:

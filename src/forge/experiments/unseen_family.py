@@ -77,6 +77,8 @@ def load_source(cfg: dict) -> dict:
     # the e12 run whose split, scorer, certificates, seeds and real windows the units follow, in the runs folder of
     # the storage root
     src = cfg["source"]
+    if not src.get("run"):
+        raise ValueError("source.run names no run, set it with --set source.run=<run_id>")
     run_dir = paths.runs_dir() / src["experiment"] / src["run"]
     if not (run_dir / "results").is_dir():
         raise FileNotFoundError(f"no results in {run_dir}, the source run must be in the runs folder")
@@ -160,9 +162,10 @@ def unseen_metrics(r: dict, stream: dict, w: int) -> dict:
 
 
 def fit_unit(unit: dict, flows: pd.DataFrame, split: dict, segments: pd.DataFrame, cfg12: dict, cal_seed,
-             draws: int, run: runs.Run) -> dict:
+             draws: int, run: runs.Run, scorer_seed: int | None = None) -> dict:
     """the scorer, the grid, the calibration sets and the certificates of e12 without the attacks of the unit's
-    families, and the counts of every window at the grid."""
+    families, and the counts of every window at the grid. the scorer takes the seed of the source run unless another
+    is given."""
     sc, c, cc = cfg12["scorer"], cfg12["certify"], cfg12["calibration"]
     eps, delta, pi_max, part_b = c["epsilon"], c["delta"], c["pi_max"], c["delta_benign"]
     start = {"start_misses": c["start_misses"], "start_slack": c["start_slack"]}
@@ -175,7 +178,8 @@ def fit_unit(unit: dict, flows: pd.DataFrame, split: dict, segments: pd.DataFram
     drop = np.isin(code, np.flatnonzero(held) + 1)
     train = np.flatnonzero((part == 0) & kept & ~drop)
     sel = np.flatnonzero((part == 1) & kept & ~drop)
-    booster, enc, sel_loss = fit_scorer(flows, label, train, sel, sc, cfg12["seed"])
+    booster, enc, sel_loss = fit_scorer(flows, label, train, sel, sc,
+                                        cfg12["seed"] if scorer_seed is None else scorer_seed)
     booster.save_model(str(run.results / "models" / f"{file_name(unit['name'])}.txt"),
                        num_iteration=booster.best_iteration)
     used = np.flatnonzero((part >= 1) & kept)
@@ -279,6 +283,14 @@ def run(cfg: dict, run: runs.Run) -> None:
         raise ValueError(f"the source run has no thresholds of {', '.join(sorted(missing))}")
     draws, pi_cal, shares_split = int(ssum["draws"]), cc["prevalence"], cfg12["split"]["shares"]
     check = bool(cfg["source"].get("check", True))
+    # with the seed of the source run the control reproduces it. with another seed the scorer, the calibration sets,
+    # the windows and the audit coins all take that seed, so the run is the leave one out at that scorer seed and
+    # the control is e12 at that seed, which the source run cannot check
+    seed, source_seed = int(cfg["seed"]), int(cfg12["seed"])
+    if seed != source_seed and check:
+        check = False
+        run.log(f"seed {seed} differs from the source run's {source_seed}, so the scorer, the calibration sets and "
+                "the windows take it and the control is not checked against the source run")
     filtered = set(d.get("filtered_captures", []))
     manifest = litnet2020.read_manifest(cfg12)
     if manifest["fingerprint"] != ssum["fingerprint"]:
@@ -302,7 +314,7 @@ def run(cfg: dict, run: runs.Run) -> None:
             + ", ".join(segments.loc[segments["filtered"], "label"]) + " have no benign flows and no window")
     units = units_of(cfg["units"], segments)
     positions = {u["name"]: window_segments.index(u["segment"]) for u in units}
-    seeds12 = e12_seeds(cfg12, len(segments))
+    seeds12 = e12_seeds({**cfg12, "seed": seed}, len(segments))
     a_real, k_window = E12_ARMS.index("real"), dep12["mixes"].index("window")
     real_claims = sclaims[(sclaims["arm"] == "real") & (sclaims["mix"] == "window")]
 
@@ -404,7 +416,7 @@ def run(cfg: dict, run: runs.Run) -> None:
     computed = {}
 
     def fit_and_log(unit):
-        fit = fit_unit(unit, flows, split, segments, cfg12, seeds12[0], draws, run)
+        fit = fit_unit(unit, flows, split, segments, cfg12, seeds12[0], draws, run, scorer_seed=seed)
         fits[unit["name"]] = fit
         held_out = ", ".join(unit["families"]) if unit["families"] else "nothing"
         run.log(f"unit {unit['name']}, held out {held_out}, trained LightGBM on {fit['train_flows']} flows with "
@@ -655,6 +667,7 @@ def run(cfg: dict, run: runs.Run) -> None:
         "source": {**cfg["source"], "fingerprint": ssum["fingerprint"], "dataset": ssum["dataset"],
                    "processed_version": ssum["processed_version"], "draws": draws, "segments": ssum["segments"],
                    "families": families, "split_shares": shares_split},
+        "seed": seed, "source_seed": source_seed,
         "epsilon": eps, "delta": delta, "delta_lower": delta_lower, "kind": m["kind"],
         "lower_ratios": m["lower_ratios"], "upper_ratios": m["upper_ratios"], "audit_rate": q,
         "alarm_floor": rule.alarm_floor(eps), "calibration_prevalence": pi_cal, "windows": labels,

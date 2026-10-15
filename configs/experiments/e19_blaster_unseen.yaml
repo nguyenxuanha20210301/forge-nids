@@ -1,0 +1,22 @@
+# the Blaster worm held out under the feature sets of e19, which asks whether a scorer that never saw Blaster still
+# escalates it without the ports. e23 with one unit on a feature set run of e19 as its source, so the scorer, the
+# grid and the certificates follow the features of that run
+inherit: [e23_unseen_family.yaml]
+
+experiment:
+  name: e19_blaster_unseen
+  module: unseen_family
+
+# the e19 run whose feature set the unit follows, its run id and variant set on the command line, for example
+# --set source.run=20261015-120000_abc1234 variant=features_no_ports
+source:
+  experiment: e19_ablations
+  run: null
+  check: true
+
+variant: null
+
+units: [blaster_worm]
+
+simulation:
+  trace: {unit: blaster_worm, composition: typical, policy: forge_simplex}

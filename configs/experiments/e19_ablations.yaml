@@ -1,0 +1,49 @@
+# E9 on the e12 pipeline, one setting of the e12 run of record moved at a time. every variant is one run of the
+# litnet_prevalence module under this name with the variant in its saved config, run with scripts/run_sweep.py, so
+# the sweep adds no code to the experiment
+inherit: [e12_litnet_prevalence.yaml]
+
+experiment:
+  name: e19_ablations
+  module: litnet_prevalence
+
+# the variant of the run, set by scripts/run_sweep.py from the list below
+variant: base
+
+scorer:
+  # the identifier-like columns count as categories where a feature set takes them in, which changes nothing for
+  # the feature sets without them
+  categorical: [proto, tcp_flags, in_if, out_if, exid]
+
+sweep:
+  # the settings of e12, the control of the sweep at the same commit
+  - {variant: base, set: {}}
+  # the split of delta, delta_benign for the DKW bound on the benign share and the rest for every family bound
+  - {variant: delta_benign_0.005, set: {certify.delta_benign: 0.005}}
+  - {variant: delta_benign_0.01, set: {certify.delta_benign: 0.01}}
+  - {variant: delta_benign_0.04, set: {certify.delta_benign: 0.04}}
+  # the grid, benign quantiles of the selection parts, with the same deeper levels
+  - {variant: grid_200, set: {certify.grid_size: 200}}
+  - {variant: grid_5000, set: {certify.grid_size: 5000}}
+  # the largest prevalence the claim covers, which also moves the size a family needs to stand alone
+  - {variant: pi_max_0.05, set: {certify.pi_max: 0.05}}
+  - {variant: pi_max_0.2, set: {certify.pi_max: 0.2}}
+  # the start of the sequence, no miss tolerated, and the slack on the dismissed share that a miss may cost
+  - {variant: start_misses_0, set: {certify.start_misses: 0}}
+  - {variant: start_slack_0.02, set: {certify.start_slack: 0.02}}
+  - {variant: start_slack_0.1, set: {certify.start_slack: 0.1}}
+  # the feature sets, every column of the processed table, the source port as it is in place of its range, and no
+  # port at all
+  - {variant: features_all,
+     set: {scorer.features: [td, proto, tcp_flags, stos, ipkt, ibyt, dp, sp, in_if, out_if, sas, das, exid]}}
+  - {variant: features_sp, set: {scorer.features: [td, proto, tcp_flags, stos, ipkt, ibyt, dp, sp]}}
+  - {variant: features_no_ports, set: {scorer.features: [td, proto, tcp_flags, stos, ipkt, ibyt]}}
+  # the training share against the onset of LAND's second source, near attack 25,900 of its 52,417 in time order,
+  # and its peak at ranks 28,531 to 30,956, with the selection and calibration shares as in e12. at 0.35 the onset
+  # and the peak fall in the calibration part, at 0.25 the peak reaches the test part, at 0.45 and 0.50 the onset
+  # moves into the selection part, and from 0.55 on into the training part
+  - {variant: split_0.25, set: {split.shares: [0.25, 0.10, 0.20, 0.45]}}
+  - {variant: split_0.45, set: {split.shares: [0.45, 0.10, 0.20, 0.25]}}
+  - {variant: split_0.50, set: {split.shares: [0.50, 0.10, 0.20, 0.20]}}
+  - {variant: split_0.55, set: {split.shares: [0.55, 0.10, 0.20, 0.15]}}
+  - {variant: split_0.60, set: {split.shares: [0.60, 0.10, 0.20, 0.10]}}
