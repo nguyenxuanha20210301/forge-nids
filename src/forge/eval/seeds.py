@@ -1,5 +1,5 @@
 """the runs of one experiment over scorer seeds, pooled into one table per saved table with the median and the 5% to
-95% range over seeds of every number, and the tables of E1, E2 and E6 cut from them.
+95% range over seeds of every number, and the tables of E1, E2, E5 and E6 cut from them.
 
 every real data experiment draws its calibration sets and its windows a thousand times inside one run, with one
 scorer seed, and proposal 8.7 asks for 20 seeds. a seed is a run of its own, so the runs of an experiment are grouped
@@ -38,7 +38,22 @@ TABLES = {
         "windows": (["unit", "window", "segment"], None),
         "units": (["unit"], None),
     },
+    "e31_anoshift_scorers": {
+        "scorers": (["scorer"], None),
+        "by_epsilon": (["scorer", "epsilon", "arm", "subset"], "pairs"),
+        "claims": (["scorer", "epsilon", "arm", "window", "segment"], "draws"),
+        "windows": (["scorer", "window", "segment"], None),
+    },
+    "e32_litnet_scorers": {
+        "scorers": (["scorer"], None),
+        "by_epsilon": (["scorer", "epsilon", "arm", "subset"], "pairs"),
+        "claims": (["scorer", "epsilon", "arm", "window", "segment"], "draws"),
+        "windows": (["scorer", "window", "segment"], None),
+    },
 }
+# the columns of the scorers table that stand beside the certified share in the E5 table
+E5_SCORER_COLUMNS = ["selection_yardstick", "selection_auc", "calibration_auc", "benign_at_miss_pooled",
+                     "benign_at_miss_hardest", "ece"]
 # the columns of the E6 table, per unit, case, composition, policy and arm
 E6_COLUMNS = ["alarm_rate", "false_alarm_rate", "alarm_in_unseen_rate", "alarm_in_unseen_violated_rate",
               "alarm_before_unseen_rate", "unseen_violated_rate", "detect_sessions_median", "unseen_leak_median",
@@ -205,6 +220,26 @@ def e2_natural_table(pooled: pd.DataFrame) -> pd.DataFrame:
     return pooled.sort_values(["window", "method"])[[c for c in columns if c in pooled]].reset_index(drop=True)
 
 
+def e5_table(pooled: pd.DataFrame, scorers: pd.DataFrame | None, summary: dict) -> pd.DataFrame:
+    # E5, the certified share of every scorer at the main epsilon on the reference windows with the window's mix,
+    # over every window for the share and over the windows in the claim for the violation check, with the scorer's
+    # yardstick, AUC, low tail and calibration error beside it, the scorers in the order of the certified share
+    main = pooled[(pooled["epsilon"] == summary["main_epsilon"]) & (pooled["arm"] == "reference")]
+    every = main[main["subset"] == "all"].set_index("scorer")
+    claim = main[main["subset"] == "in_claim"].set_index("scorer")
+    columns = ["kind", "windows", "seeds"] + _stats(every, ["dismissed_mean", "refused", "best_every_mix_dismissed"])
+    t = every[[c for c in columns if c in every]].copy()
+    t["claim_windows"] = claim["windows"].reindex(t.index)
+    for col in _stats(claim, ["violation_rate", "violation_window_max"]):
+        t[f"claim_{col}"] = claim[col].reindex(t.index)
+    if scorers is not None:
+        s = scorers.set_index("scorer")
+        for col in _stats(s, E5_SCORER_COLUMNS):
+            t[col] = s[col].reindex(t.index)
+    share = "dismissed_mean_median" if "dismissed_mean_median" in t else "dismissed_mean"
+    return t.sort_values(share, ascending=False).reset_index()
+
+
 def e6_table(pooled: pd.DataFrame) -> pd.DataFrame:
     columns = ["unit", "case", "composition", "policy", "arm", "unseen_segment", "unseen_sessions", "seeds"] + \
         _stats(pooled, E6_COLUMNS)
@@ -264,6 +299,8 @@ def pool_experiment(experiment: str, root=None, out=None, ignore=(), first: str 
             tables["e6_by_family"] = e6_table(tables["claims"])
         if "windows" in tables:
             tables["e6_windows"] = e6_windows_table(tables["windows"], summary)
+    if experiment in ("e31_anoshift_scorers", "e32_litnet_scorers") and "by_epsilon" in tables:
+        tables["e5_by_scorer"] = e5_table(tables["by_epsilon"], tables.get("scorers"), summary)
     if out is not None:
         out = Path(out)
         out.mkdir(parents=True, exist_ok=True)

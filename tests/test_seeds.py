@@ -219,3 +219,39 @@ def test_pool_e11_e1_table_reads_the_main_period(tmp_path):
     assert np.isclose(e1.loc["ltt_iid", "violation_rate_median"], 0.91)
     assert np.isclose(e1.loc["ltt_iid", "violation_rate_high"], 0.919)
     assert "claims" not in tables and "windows" not in tables
+
+
+
+def test_pool_e32_e5_table_ranks_the_scorers(tmp_path):
+    root = tmp_path / "runs"
+    for seed in (0, 1, 2):
+        rows = []
+        for scorer, share in [("lightgbm", 0.61), ("xgboost", 0.66)]:
+            for eps in (0.0005, 0.001):
+                for arm in ("reference", "real"):
+                    for subset, windows in [("all", 11), ("in_claim", 7)]:
+                        rows.append({"scorer": scorer, "kind": "base", "epsilon": eps, "arm": arm, "subset": subset,
+                                     "windows": windows, "pairs": windows * 1000,
+                                     "violation_rate": 0.001 * seed if subset == "in_claim" else 0.05,
+                                     "violation_window_max": 0.01 * seed, "refused": 0.0,
+                                     "dismissed_mean": share + 0.01 * seed, "best_every_mix_dismissed": share + 0.004,
+                                     "family_minimum": 1364, "groups": 9})
+        scorers = pd.DataFrame({"scorer": ["lightgbm", "xgboost"], "kind": ["base", "base"],
+                                "selection_auc": [0.980, 0.981], "calibration_auc": [0.973 + 0.001 * seed] * 2,
+                                "benign_at_miss_hardest": [0.69, 0.75], "ece": [0.0056, 0.0053],
+                                "selection_yardstick": [0.87, 0.89], "benign_at_miss_pooled": [0.81, 0.79],
+                                "hardest_family": ["land", "land" if seed else "smurf"]})
+        fake_run(root, "e32_litnet_scorers", f"20261015-00000{seed}_a",
+                 {"seed": seed, "experiment": {"name": "e32_litnet_scorers"}},
+                 tables=[("by_epsilon", pd.DataFrame(rows)), ("scorers", scorers)], summary={"main_epsilon": 0.001})
+    tables = seeds.pool_experiment("e32_litnet_scorers", root, log=lambda s: None)
+    e5 = tables["e5_by_scorer"]
+    assert e5["scorer"].tolist() == ["xgboost", "lightgbm"] and e5["seeds"].tolist() == [3, 3]
+    assert e5["windows"].tolist() == [11, 11] and e5["claim_windows"].tolist() == [7, 7]
+    assert np.isclose(e5["dismissed_mean_median"].iloc[0], 0.67)
+    assert np.isclose(e5["dismissed_mean_high"].iloc[1], 0.629)
+    # the violation check reads the windows in the claim, pooled over the pairs of every seed
+    assert np.isclose(e5["claim_violation_rate_pooled"].iloc[0], 0.001)
+    assert np.isclose(e5["benign_at_miss_hardest"].iloc[0], 0.75) and "hardest_family" not in tables["scorers"]
+    assert np.isclose(e5["calibration_auc_median"].iloc[1], 0.974)
+    assert "claims" not in tables and "windows" not in tables

@@ -1,4 +1,4 @@
-"""pools the imported runs of one experiment over scorer seeds into the tables of E1, E2 and E6, with the median and
+"""pools the imported runs of one experiment over scorer seeds into the tables of E1, E2, E5 and E6, with the median and
 the 5% to 95% range over seeds of every number.
 
     python analysis/pool_seeds.py e12_litnet_prevalence
@@ -38,6 +38,13 @@ def reading(experiment: str, tables: dict) -> None:
         print(f"\nE2, the reference window of every family at the main prevalence, share of draws with FOR above "
               "epsilon")
         print(t[["segment", "method", "in_claim"] + seeds._stats(t, ["rate"])]
+              .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+    if "e5_by_scorer" in tables:
+        t = tables["e5_by_scorer"]
+        print(f"\nE5, the certified share of every scorer at the main epsilon on the reference windows over "
+              f"{t['seeds'].max()} seeds, the violation share over the windows in the claim")
+        print(t[["scorer", "kind"] + seeds._stats(t, ["dismissed_mean", "refused", "best_every_mix_dismissed",
+                                                         "claim_violation_rate", "benign_at_miss_hardest"])]
               .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
     if "e6_by_family" in tables:
         t = tables["e6_by_family"]
