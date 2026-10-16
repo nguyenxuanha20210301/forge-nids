@@ -192,3 +192,32 @@ def test_read_pooled_and_settings(tmp_path):
     found = paper.run_folders(tables, "e12_litnet_prevalence", tmp_path / "runs")
     assert list(found) == [0] and found[0].name == "a"
     assert json.loads((found[0] / "results" / "summary.json").read_text()) == {}
+
+
+def test_e7_monitoring_over_two_seeds_and_the_e3_tables(tmp_path):
+    folders = {}
+    for seed in (0, 1):
+        claims = pd.DataFrame([{"composition": "typical", "policy": p, "arm": arm, "dismissed_share_mean": 0.5,
+                                "audits_mean": 10.0, "leak_median": 3.0 + seed, "realized_for_median": 1e-4,
+                                "alarm_rate": 0.2 + 0.2 * seed if arm == "monitor_year" else 0.0}
+                               for p in ("forge_simplex", "ltt_iid") for arm in ("monitor_year", "none")])
+        blocks = pd.DataFrame({"composition": ["typical"] * 2, "window": [0, 1], "window_sessions": [500, 500]})
+        folders[seed] = fake_run(tmp_path, "e21_monitor_streams", f"20261016-00000{seed}_b", {"seed": seed},
+                                 tables=[("claims", claims), ("blocks", blocks)], summary={})
+    table = paper.e7_monitoring(folders)
+    assert (table["seeds"] == 2).all() and (table["sessions"] == 1000).all()
+    row = table[(table["policy"] == "ltt_iid") & (table["arm"] == "monitor_year")].iloc[0]
+    # the leakage per million is the median over the two seeds with their range, the alarm share its median
+    assert row["leaked_per_million_median"] == pytest.approx(3.5 / 1000 * 1e6)
+    assert row["leaked_per_million_low"] == pytest.approx(3.05 / 1000 * 1e6)
+    assert row["alarm_rate_median"] == pytest.approx(0.3)
+    fig = figures.e7_workload_vs_risk(pd.DataFrame(), table)
+    assert len(fig.axes) == 2
+    pooled = {"e21": {"e3_by_policy": pd.DataFrame({"policy": ["forge_simplex"], "composition": ["typical"],
+                                                    "arm": ["monitor"], "seeds": [2], "alarm_rate_pooled": [0.1]})},
+              "e22": {"e4_by_cell": pd.DataFrame({"name": ["main"], "policy": ["ltt_iid"], "seeds": [2],
+                                                  "leak_median_median": [3000.0]})}}
+    out = paper.e3_tables(pooled)
+    assert set(out) == {"e3_by_policy", "e4_by_cell"}
+    assert out["e3_by_policy"]["dataset"].tolist() == ["anoshift"] and out["e4_by_cell"].columns[0] == "dataset"
+    assert paper.e3_tables({"e11": {}}) == {}

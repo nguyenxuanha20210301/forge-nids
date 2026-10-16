@@ -255,3 +255,97 @@ def test_pool_e32_e5_table_ranks_the_scorers(tmp_path):
     assert np.isclose(e5["benign_at_miss_hardest"].iloc[0], 0.75) and "hardest_family" not in tables["scorers"]
     assert np.isclose(e5["calibration_auc_median"].iloc[1], 0.974)
     assert "claims" not in tables and "windows" not in tables
+
+
+def e21_tables(seed):
+    # the claims, blocks and windows of an e21 run, the alarm share and the leakage moving with the seed
+    rows = []
+    for policy in ("forge_simplex", "ltt_iid"):
+        for composition, pi in (("typical", 0.02), ("worst", 0.1)):
+            for arm in ("monitor", "monitor_year", "none"):
+                rows.append({"policy": policy, "composition": composition, "prevalence": pi, "arm": arm,
+                             "draws": 1000, "alarm_rate": 0.1 + 0.1 * seed if arm != "none" else 0.0,
+                             "false_alarm_rate": 0.0, "alarm_block_median": 3.0 + seed, "alarm_session_median": 5e4,
+                             "onset_true_rate": 1.0, "onset_true_block_median": 1.0, "onset_realized_rate": 1.0,
+                             "leak_median": 600.0 + 10 * seed, "leak_mean": 550.0, "excess_median": -3000.0,
+                             "sessions_median": 4e6, "dismissed_share_mean": 0.5, "realized_for_median": 1e-4,
+                             "audits_mean": 2e4, "bound_median": 2000.0 if arm != "none" else np.nan,
+                             "over_bound_rate": 0.0, "miscover_rate": 0.01 * seed,
+                             "miscover_sequence_rate": 0.002 * seed, "sequences": 6 if arm == "monitor_year" else 1,
+                             "blocks_certified_mean": 50.0, "blocks_violation_mean": 2.0})
+    claims = pd.DataFrame(rows)
+    blocks = pd.DataFrame([{"policy": p, "composition": c, "prevalence": pi, "window": w, "year": 2010 + w // 2,
+                            "block": w % 2, "window_sessions": 1000 * (w + 1), "dismissed_share_mean": 0.5,
+                            "for_true_mean": 1e-4 * (seed + 1), "attacks_mean": 10.0}
+                           for p in ("forge_simplex", "ltt_iid") for c, pi in (("typical", 0.02), ("worst", 0.1))
+                           for w in range(4)])
+    windows = pd.DataFrame({"window": range(4), "year": [2010, 2010, 2011, 2011], "sessions": [2000] * 4,
+                            "auc": [0.9 + 0.01 * seed] * 4})
+    return [("claims", claims), ("blocks", blocks), ("windows", windows)]
+
+
+def test_pool_e21_and_e22_tables_and_check_the_seed_of_the_source_run(tmp_path):
+    root = tmp_path / "runs"
+    for seed in (0, 1):
+        fake_run(root, "e11_anoshift_prevalence", f"20261015-00000{seed}_a",
+                 {"seed": seed, "experiment": {"name": "e11_anoshift_prevalence"}})
+        fake_run(root, "e21_monitor_streams", f"20261016-00000{seed}_b",
+                 {"seed": seed, "experiment": {"name": "e21_monitor_streams"},
+                  "source": {"experiment": "e11_anoshift_prevalence", "run": f"20261015-00000{seed}_a"}},
+                 tables=e21_tables(seed), summary={"epsilon": 0.001, "source": {"dataset": "anoshift"}})
+    lines = []
+    tables = seeds.pool_experiment("e21_monitor_streams", root, out=tmp_path / "pooled", log=lines.append)
+    assert set(tables) >= {"runs", "summary_by_seed", "claims", "blocks", "windows", "e3_by_policy"}
+    # the run id of the source differs between the seeds by design, its seed is checked, and the runs list it
+    assert tables["runs"]["source_run"].tolist() == ["20261015-000000_a", "20261015-000001_a"]
+    assert any("source runs of 2 of 2 seeds checked" in line for line in lines)
+    e3 = tables["e3_by_policy"].set_index(["policy", "composition", "arm"])
+    assert len(e3) == 12 and "stream" not in e3 and (e3["seeds"] == 2).all()
+    row = e3.loc[("forge_simplex", "typical", "monitor")]
+    assert np.isclose(row["alarm_rate_pooled"], 0.15) and np.isclose(row["alarm_rate_median"], 0.15)
+    assert np.isclose(row["leak_median_median"], 605.0) and np.isclose(row["leak_median_high"], 609.5)
+    assert row["sequences"] == 1 and e3.loc[("forge_simplex", "typical", "monitor_year"), "sequences"] == 6
+    blocks = tables["blocks"].set_index(["policy", "composition", "window"])
+    assert len(blocks) == 16 and blocks.loc[("ltt_iid", "worst", 3), "window_sessions"] == 4000
+    assert np.isclose(blocks.loc[("ltt_iid", "worst", 3), "for_true_mean_median"], 1.5e-4)
+    assert np.isclose(tables["windows"].set_index("window").loc[2, "auc_median"], 0.905)
+    assert (tmp_path / "pooled" / "e3_by_policy.csv").exists()
+    # a source run with another seed stops the pool, and one missing from the runs folder is not checked
+    fake_run(root, "e21_monitor_streams", "20261016-000002_b",
+             {"seed": 2, "experiment": {"name": "e21_monitor_streams"},
+              "source": {"experiment": "e11_anoshift_prevalence", "run": "20261015-000000_a"}},
+             tables=e21_tables(2), summary={"epsilon": 0.001})
+    with pytest.raises(ValueError, match="seed 2 reads 20261015-000000_a of seed 0"):
+        seeds.pool_experiment("e21_monitor_streams", root, log=lines.append)
+    fake_run(root, "e21_monitor_streams", "20261016-000003_b",
+             {"seed": 2, "experiment": {"name": "e21_monitor_streams"},
+              "source": {"experiment": "e11_anoshift_prevalence", "run": "20261015-000009_a"}},
+             tables=e21_tables(2), summary={"epsilon": 0.001})
+    tables = seeds.pool_experiment("e21_monitor_streams", root, log=lines.append)
+    assert tables["runs"]["seed"].tolist() == [0, 1, 2]
+    assert any("seed 2, source run 20261015-000009_a is not in the runs folder" in line for line in lines)
+    # e22 pools its claims per cell and keeps the cells and the audit policies as they are
+    for seed in (0, 1):
+        claims = pd.DataFrame([{"policy": "conformal_fnr", "composition": "typical", "prevalence": 0.02,
+                                "name": name, "axis": axis, "rate": rate, "allocation": "uniform", "floor": 0.0005,
+                                "kind": "thinning", "restart": "year", "delay": 0, "target": "count", "draws": 1000,
+                                "audits_per_million": rate * 1e6, "alarm_rate": 0.9 + 0.05 * seed,
+                                "false_alarm_rate": 0.0, "alarm_block_median": 28.0, "alarm_session_median": 1e6,
+                                "leak_median": 3000.0 - 100 * seed, "leak_mean": 3000.0, "leak_in_delay_median": 0.0,
+                                "excess_median": 100.0, "dismissed_share_mean": 0.5, "bound_median": 16000.0,
+                                "over_bound_rate": 0.0, "miscover_sequence_rate": 0.01, "sequences": 6,
+                                "blocks_certified_mean": 0.0}
+                               for name, axis, rate in [("main", "main", 0.005), ("rate_0.01", "rate", 0.01)]])
+        cells = pd.DataFrame({"name": ["main", "rate_0.01"], "axis": ["main", "rate"], "rate": [0.005, 0.01]})
+        policies = pd.DataFrame({"rate": [0.005, 0.01], "allocation": ["uniform"] * 2, "floor": [0.0005] * 2,
+                                 "bin": [0, 0], "q": [0.005, 0.01]})
+        fake_run(root, "e22_monitor_sweep", f"20261016-00000{seed}_c",
+                 {"seed": seed, "experiment": {"name": "e22_monitor_sweep"},
+                  "source": {"experiment": "e11_anoshift_prevalence", "run": f"20261015-00000{seed}_a"}},
+                 tables=[("claims", claims), ("cells", cells), ("policies", policies)], summary={"epsilon": 0.001})
+    tables = seeds.pool_experiment("e22_monitor_sweep", root, log=lines.append)
+    e4 = tables["e4_by_cell"].set_index("name")
+    assert e4.index.tolist() == ["main", "rate_0.01"] and e4.loc["rate_0.01", "axis"] == "rate"
+    assert np.isclose(e4.loc["main", "alarm_rate_pooled"], 0.925)
+    assert np.isclose(e4.loc["main", "leak_median_median"], 2950.0) and e4.loc["main", "sequences"] == 6
+    assert tables["cells"]["rate"].tolist() == [0.005, 0.01] and len(tables["policies"]) == 2

@@ -14,9 +14,11 @@ from forge import paths, runs
 from forge.eval import seeds, workload
 
 # the pooled folder of each experiment the paper reads, under pooled/ of the storage root
-EXPERIMENTS = {"e11": "e11_anoshift_prevalence", "e12": "e12_litnet_prevalence", "e23": "e23_unseen_family",
-               "e31": "e31_anoshift_scorers", "e32": "e32_litnet_scorers"}
-DATASETS = {"e11": "anoshift", "e12": "litnet2020", "e31": "anoshift", "e32": "litnet2020"}
+EXPERIMENTS = {"e11": "e11_anoshift_prevalence", "e12": "e12_litnet_prevalence", "e21": "e21_monitor_streams",
+               "e22": "e22_monitor_sweep", "e23": "e23_unseen_family", "e31": "e31_anoshift_scorers",
+               "e32": "e32_litnet_scorers"}
+DATASETS = {"e11": "anoshift", "e12": "litnet2020", "e21": "anoshift", "e22": "anoshift", "e23": "litnet2020",
+            "e31": "anoshift", "e32": "litnet2020"}
 # the columns of the pooled tables that reach the paper, in their median, low, high and pooled forms
 E1_COLUMNS = ["violation_rate", "violation_window_max", "refused", "dismissed_mean", "for_median",
               "best_up_to_pi_max_dismissed", "best_at_prevalence_dismissed", "best_every_mix_dismissed",
@@ -140,6 +142,18 @@ def e6_tables(pooled: dict) -> dict:
                                     E6_COLUMNS)
     if "e23" in pooled and "e6_windows" in pooled["e23"]:
         out["e6_windows"] = pooled["e23"]["e6_windows"].copy()
+    return out
+
+
+def e3_tables(pooled: dict) -> dict:
+    """E3 and E4, the alarm, the leakage, the bound and the coverage of every arm on the real streams of AnoShift
+    per policy and composition over seeds, and the same per cell of the sweep."""
+    out = {}
+    for name, table in [("e21", "e3_by_policy"), ("e22", "e4_by_cell")]:
+        if name in pooled and table in pooled[name]:
+            t = pooled[name][table].copy()
+            t.insert(0, "dataset", DATASETS[name])
+            out[table] = t
     return out
 
 

@@ -3,7 +3,9 @@ folder.
 
 every run is a child process of scripts/run.py, so a failed run stops nothing else and its memory goes with it. a
 seed or variant whose resolved config already has a finished run in the runs folder is skipped, so a batch that a
-Colab session cut short picks up where it stopped when it is started again.
+Colab session cut short picks up where it stopped when it is started again. an experiment that reads its streams
+from the run of another experiment, such as e21 from e11, can take the source run of the same seed, so that the
+scorer seed of the source and the coin seed of the run move together.
 """
 
 import subprocess
@@ -15,6 +17,7 @@ import yaml
 
 from forge import paths, runs
 from forge.config import load_config
+from forge.eval.seeds import seed_runs, select_runs
 
 # a config key that describes the whole batch and not the run, left out when two configs are compared
 BATCH_KEYS = ("sweep",)
@@ -58,6 +61,22 @@ def finished_run(cfg: dict, root=None) -> Path | None:
                 comparable(runs.load_run_config(run_dir)) == comparable(cfg):
             return run_dir
     return None
+
+
+def source_runs(experiment: str, seeds, first: str | None = None, root=None, log=print) -> dict:
+    """the run id of the latest finished run of the experiment at every seed in seeds, at or after the run id first,
+    for a config whose source run is read per seed. the runs must agree in everything but the seed, as the pool asks
+    of them, so first keeps the runs of an earlier design out. stops when a seed has no such run."""
+    kept = select_runs(seed_runs(experiment, root), first=first, log=log)
+    found = dict(zip(kept["seed"].astype(int), kept["run_id"]))
+    missing = [n for n in seeds if n not in found]
+    if missing:
+        raise ValueError(f"no finished run of {experiment} at seed {', '.join(str(n) for n in missing)}"
+                         + (f" at or after {first}" if first else "") + ", the seeds with a run are "
+                         + ", ".join(str(n) for n in sorted(found)))
+    for n in seeds:
+        log(f"seed {n}, source {experiment} run {found[n]}")
+    return {n: found[n] for n in seeds}
 
 
 def run_once(config, sets, log=print) -> dict:

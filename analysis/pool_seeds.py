@@ -1,16 +1,19 @@
-"""pools the imported runs of one experiment over scorer seeds into the tables of E1, E2, E5 and E6, with the median and
-the 5% to 95% range over seeds of every number.
+"""pools the imported runs of one experiment over scorer seeds into the tables of E1 to E6, with the median and the
+5% to 95% range over seeds of every number.
 
     python analysis/pool_seeds.py e12_litnet_prevalence
     python analysis/pool_seeds.py e23_unseen_family --out drive/pooled/e23_unseen_family
     python analysis/pool_seeds.py e11_anoshift_prevalence --from 20261013-223628_8502bf0
+    python analysis/pool_seeds.py e21_monitor_streams --from <first run of the seeds>
 
 the runs come from the runs folder of the storage root, at or after the run id given with --from, one finished run
 per seed, the latest, and their configs must agree in everything but the seed and the keys named with --ignore, so
 the runs of an earlier design stay out through --from. the tables go to pooled/<experiment> under
 the storage root unless --out names another folder, as csv files, one per saved table of the experiment plus the E
 tables, the summaries by seed and the list of runs. for e23 the control of every seed is also set against the e12 run
-with the same seed, when the runs folder holds one.
+with the same seed, when the runs folder holds one. e21 and e22 read their thresholds from the e11 run of the same
+seed, so their runs differ in the run id of the source by design, and the seed of every source run is checked
+instead, when the runs folder holds it.
 """
 
 import argparse
@@ -57,6 +60,21 @@ def reading(experiment: str, tables: dict) -> None:
         print("\nE6, the family's window with the family unseen against known, at the offline FORGE thresholds")
         t = tables["e6_windows"]
         print(t[["unit", "family"] + seeds._stats(t, ["miss_unseen", "miss_known", "auc_unseen", "auc_known"])]
+              .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+    if "e3_by_policy" in tables:
+        t = tables["e3_by_policy"]
+        t = t[t["arm"].isin(["monitor", "monitor_year", "none"])]
+        print(f"\nE3, the alarm and the leakage of every policy under one sequence, a sequence per year and no "
+              f"monitoring over {t['seeds'].max()} seeds")
+        print(t[[c for c in ["stream", "composition", "policy", "arm"] if c in t]
+                + seeds._stats(t, ["alarm_rate", "alarm_block_median", "leak_median", "miscover_sequence_rate"])]
+              .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+    if "e4_by_cell" in tables:
+        t = tables["e4_by_cell"]
+        t = t[t["policy"] == "conformal_fnr"]
+        print(f"\nE4, every cell on the conformal FNR stream over {t['seeds'].max()} seeds")
+        print(t[["name", "composition"] + seeds._stats(t, ["alarm_rate", "leak_median", "audits_per_million",
+                                                           "miscover_sequence_rate"])]
               .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
 
 

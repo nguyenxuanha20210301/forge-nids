@@ -1,11 +1,12 @@
-"""the tables and figures of the paper over seeds, from the pooled tables of e11, e12, e23, e31 and e32 and the run
-folders of their seeds.
+"""the tables and figures of the paper over seeds, from the pooled tables of e11, e12, e21, e22, e23, e31 and e32 and
+the run folders of their seeds.
 
     python analysis/paper_results.py
     python analysis/paper_results.py --out results --e21 20261014-232506_44dd25a --audit-rate 0.005
 
 the pooled tables come from analysis/pool_seeds.py under pooled/ of the storage root, and E7 reads the run folder of
-every seed behind them plus one e21 run, the latest finished one unless --e21 names it. the tables go to
+every seed behind them. its monitoring stage on AnoShift reads the e21 runs of the pooled folder, or, when there is
+no pooled e21 or --e21 names a run, that one run, the latest finished one unless named. the tables go to
 results/tables and the figures to results/figures of the repository unless --out names another folder, the tables
 first, and every figure is drawn from the written tables alone. an experiment whose pooled folder is missing is left
 out with a line, and the tables and figures that need it are skipped.
@@ -44,6 +45,8 @@ def tables_of(pooled: dict, args) -> dict:
         if name not in pooled:
             continue
         row = {"experiment": experiment, **paper.settings(pooled[name], SETTING_KEYS)}
+        # an experiment that reads a source run carries the dataset of that run
+        row.setdefault("dataset", paper.DATASETS.get(name))
         listed = pooled[name]["runs"]
         row.update({"seeds": len(listed), "first_run": listed["run_id"].min(), "last_run": listed["run_id"].max()})
         settings.append(row)
@@ -51,6 +54,7 @@ def tables_of(pooled: dict, args) -> dict:
     if "e11" in pooled or "e12" in pooled:
         out["e1_for_by_prevalence"] = paper.e1_table(pooled)
     out.update(paper.e2_tables(pooled))
+    out.update(paper.e3_tables(pooled))
     out.update(paper.e5_tables(pooled))
     out.update(paper.e6_tables(pooled))
     certification = [paper.e7_certification(paper.run_folders(pooled[n], paper.EXPERIMENTS[n]), args.audit_rate)
@@ -59,12 +63,17 @@ def tables_of(pooled: dict, args) -> dict:
         out["e7_certification"] = pd.concat(certification, ignore_index=True)
         out["e7_frontier"] = paper.e7_frontier(out["e7_certification"])
     monitoring = []
-    e21 = latest_run("e21_monitor_streams", args.e21)
-    if e21 is not None:
-        monitoring.append(paper.e7_monitoring({0: e21}))
-        out["settings"] = pd.concat([out["settings"], pd.DataFrame([{
-            "experiment": "e21_monitor_streams", "dataset": "anoshift", "seeds": 1, "first_run": e21.name,
-            "last_run": e21.name}])], ignore_index=True)
+    # the e21 runs of the pooled folder stand for the monitoring stage on AnoShift, else one run
+    if args.e21 is None and "e21" in pooled and paper.run_folders(pooled["e21"], paper.EXPERIMENTS["e21"]):
+        monitoring.append(paper.e7_monitoring(paper.run_folders(pooled["e21"], paper.EXPERIMENTS["e21"])))
+    else:
+        e21 = latest_run("e21_monitor_streams", args.e21)
+        if e21 is not None:
+            monitoring.append(paper.e7_monitoring({0: e21}))
+            out["settings"] = pd.concat([out["settings"][out["settings"]["experiment"] != "e21_monitor_streams"],
+                                         pd.DataFrame([{"experiment": "e21_monitor_streams", "dataset": "anoshift",
+                                                        "seeds": 1, "first_run": e21.name, "last_run": e21.name}])],
+                                        ignore_index=True)
     if "e23" in pooled and paper.run_folders(pooled["e23"], paper.EXPERIMENTS["e23"]):
         monitoring.append(paper.e7_monitoring(paper.run_folders(pooled["e23"], paper.EXPERIMENTS["e23"])))
     if monitoring:

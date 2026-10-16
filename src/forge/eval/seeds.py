@@ -1,12 +1,14 @@
 """the runs of one experiment over scorer seeds, pooled into one table per saved table with the median and the 5% to
-95% range over seeds of every number, and the tables of E1, E2, E5 and E6 cut from them.
+95% range over seeds of every number, and the tables of E1 to E6 cut from them.
 
 every real data experiment draws its calibration sets and its windows a thousand times inside one run, with one
 scorer seed, and proposal 8.7 asks for 20 seeds. a seed is a run of its own, so the runs of an experiment are grouped
 by the seed in their saved config, one finished run per seed, the latest, and their configs must agree in everything
 but the seed. a column that every seed agrees on row by row, such as the sessions of a window or the family of a
 capture, is kept as it is, a number that moves with the seed gets its median and its 5% and 95% quantiles over
-seeds, and a share of draws is also pooled over the draws of every seed.
+seeds, and a share of draws is also pooled over the draws of every seed. an experiment that reads its thresholds
+from the run of another experiment, e21 and e22 from e11, names the source run of the same seed in its config, so
+the pool ignores that run id and checks the seed of the source run instead.
 """
 
 import json
@@ -15,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from forge import runs
+from forge import paths, runs
 
 LOW, HIGH = 0.05, 0.95
 # the tables of each experiment, with the columns that identify a row within one run and the column that weights
@@ -50,7 +52,21 @@ TABLES = {
         "claims": (["scorer", "epsilon", "arm", "window", "segment"], "draws"),
         "windows": (["scorer", "window", "segment"], None),
     },
+    "e21_monitor_streams": {
+        "claims": (["stream", "policy", "composition", "arm"], "draws"),
+        "blocks": (["stream", "policy", "composition", "window"], None),
+        "windows": (["window"], None),
+    },
+    "e22_monitor_sweep": {
+        "claims": (["policy", "composition", "name"], "draws"),
+        "cells": (["name"], None),
+        "policies": (["rate", "allocation", "floor", "bin"], None),
+    },
 }
+# the experiments whose thresholds come from the source run of the same seed, so their configs differ in the run id
+# of the source by design and the pool checks the seed of that run instead
+SOURCE_PER_SEED = ("e21_monitor_streams", "e22_monitor_sweep")
+SOURCE_KEYS = ("source.run",)
 # the columns of the scorers table that stand beside the certified share in the E5 table
 E5_SCORER_COLUMNS = ["selection_yardstick", "selection_auc", "calibration_auc", "benign_at_miss_pooled",
                      "benign_at_miss_hardest", "ece"]
@@ -59,6 +75,16 @@ E6_COLUMNS = ["alarm_rate", "false_alarm_rate", "alarm_in_unseen_rate", "alarm_i
               "alarm_before_unseen_rate", "unseen_violated_rate", "detect_sessions_median", "unseen_leak_median",
               "unseen_attacks_median", "leak_median", "unseen_for_true_mean", "unseen_miss_mean", "miscover_rate",
               "miscover_sequence_rate", "over_bound_rate", "bound_median", "windows_certified_mean"]
+# the columns of the E3 table, per stream, policy, composition and arm of e21
+E3_COLUMNS = ["alarm_rate", "false_alarm_rate", "alarm_block_median", "alarm_session_median", "onset_true_rate",
+              "onset_true_block_median", "onset_realized_rate", "leak_median", "leak_mean", "excess_median",
+              "sessions_median", "dismissed_share_mean", "realized_for_median", "audits_mean", "bound_median",
+              "over_bound_rate", "miscover_rate", "miscover_sequence_rate", "sequences", "blocks_certified_mean",
+              "blocks_violation_mean"]
+# the columns of the E4 table, per cell, policy and composition of e22
+E4_COLUMNS = ["audits_per_million", "alarm_rate", "false_alarm_rate", "alarm_block_median", "alarm_session_median",
+              "leak_median", "leak_mean", "leak_in_delay_median", "excess_median", "dismissed_share_mean",
+              "bound_median", "over_bound_rate", "miscover_sequence_rate", "sequences", "blocks_certified_mean"]
 
 
 def flatten(cfg: dict, prefix: str = "") -> dict:
@@ -270,17 +296,74 @@ def e6_windows_table(pooled: pd.DataFrame, summary: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def e3_table(pooled: pd.DataFrame) -> pd.DataFrame:
+    # E3, the alarm, the leakage, the bound and the coverage of every arm on each policy's stream per composition
+    columns = ["stream", "policy", "composition", "prevalence", "arm", "seeds"] + _stats(pooled, E3_COLUMNS)
+    return pooled[[c for c in dict.fromkeys(columns) if c in pooled]].reset_index(drop=True)
+
+
+def e4_table(pooled: pd.DataFrame) -> pd.DataFrame:
+    # E4, the same per cell of the sweep, the main cell among them
+    columns = ["name", "axis", "rate", "allocation", "floor", "kind", "restart", "delay", "target", "policy",
+               "composition", "prevalence", "seeds"] + _stats(pooled, E4_COLUMNS)
+    return pooled[[c for c in dict.fromkeys(columns) if c in pooled]].reset_index(drop=True)
+
+
+def source_of(cfg: dict) -> dict | None:
+    # the experiment and run id of the source run a config names, none when it has no source
+    src = cfg.get("source")
+    if not isinstance(src, dict) or not src.get("experiment") or not src.get("run"):
+        return None
+    return {"experiment": str(src["experiment"]), "run": str(src["run"])}
+
+
+def check_sources(selected: pd.DataFrame, root=None, log=print) -> pd.DataFrame:
+    """the seed of the source run of every selected run against the run's own seed, for an experiment whose
+    thresholds come from the source run of the same seed. returns one row per run with its source run and that
+    run's seed, which is missing when the source run is not in the runs folder, and stops on a seed that differs,
+    since the pool would then mix scorer seeds."""
+    base = Path(root) if root else paths.runs_dir()
+    rows = []
+    wrong = []
+    for r in selected.itertuples():
+        src = source_of(r.config)
+        row = {"seed": int(r.seed), "run_id": r.run_id, "source_run": None if src is None else src["run"],
+               "source_seed": np.nan}
+        if src is not None:
+            folder = base / src["experiment"] / src["run"]
+            if (folder / "config.yaml").is_file():
+                row["source_seed"] = int(runs.load_run_config(folder).get("seed", 0))
+                if row["source_seed"] != row["seed"]:
+                    wrong.append(f"seed {r.seed} reads {src['run']} of seed {row['source_seed']}")
+            else:
+                log(f"seed {r.seed}, source run {src['run']} is not in the runs folder, its seed is not checked")
+        rows.append(row)
+    if wrong:
+        raise ValueError("the source run of a seed has another seed, " + ", ".join(wrong))
+    checked = sum(np.isfinite(row["source_seed"]) for row in rows)
+    log(f"source runs of {checked} of {len(rows)} seeds checked, every one with the seed of its run")
+    return pd.DataFrame(rows)
+
+
 def pool_experiment(experiment: str, root=None, out=None, ignore=(), first: str | None = None, log=print) -> dict:
     """pools the finished runs of the experiment in the runs folder, at or after the run id first, and writes the
     pooled tables, the summaries by seed, the list of runs and the E tables of the experiment into out. returns the
     tables by name."""
     if experiment not in TABLES:
         raise ValueError(f"no pooling rule for {experiment}, known are {', '.join(TABLES)}")
+    if experiment in SOURCE_PER_SEED:
+        ignore = (*ignore, *SOURCE_KEYS)
     selected = select_runs(seed_runs(experiment, root), ignore, first, log)
     log(f"{experiment}, {len(selected)} seeds, " + ", ".join(f"seed {r.seed} run {r.run_id}"
                                                                for r in selected.itertuples()))
     summary = runs.load_json(selected["dir"].iloc[0], "summary")
-    tables = {"runs": selected.drop(columns=["dir", "config"]), "summary_by_seed": summaries(selected)}
+    listed = selected.drop(columns=["dir", "config"])
+    sources = [source_of(c) for c in selected["config"]]
+    if any(src is not None for src in sources):
+        listed["source_run"] = [None if src is None else src["run"] for src in sources]
+    if experiment in SOURCE_PER_SEED:
+        check_sources(selected, root, log)
+    tables = {"runs": listed, "summary_by_seed": summaries(selected)}
     for name, (keys, weight) in TABLES[experiment].items():
         frames = load_frames(selected, name)
         if len(frames) < len(selected):
@@ -301,6 +384,10 @@ def pool_experiment(experiment: str, root=None, out=None, ignore=(), first: str 
             tables["e6_windows"] = e6_windows_table(tables["windows"], summary)
     if experiment in ("e31_anoshift_scorers", "e32_litnet_scorers") and "by_epsilon" in tables:
         tables["e5_by_scorer"] = e5_table(tables["by_epsilon"], tables.get("scorers"), summary)
+    if experiment == "e21_monitor_streams" and "claims" in tables:
+        tables["e3_by_policy"] = e3_table(tables["claims"])
+    if experiment == "e22_monitor_sweep" and "claims" in tables:
+        tables["e4_by_cell"] = e4_table(tables["claims"])
     if out is not None:
         out = Path(out)
         out.mkdir(parents=True, exist_ok=True)
