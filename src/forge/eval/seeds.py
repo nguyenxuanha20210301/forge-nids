@@ -26,17 +26,19 @@ TABLES = {
     "e11_anoshift_prevalence": {
         "by_prevalence": (["arm", "period", "method", "prevalence", "mix"], "pairs"),
         "claims": (["arm", "window", "year", "block", "period", "method", "prevalence", "mix"], "draws"),
+        "estimates": (["arm", "window", "year", "block", "period", "prevalence", "mix"], "draws"),
         "windows": (["window", "year", "block", "period"], None),
     },
     "e12_litnet_prevalence": {
         "by_prevalence": (["arm", "subset", "method", "prevalence", "mix"], "pairs"),
         "claims": (["arm", "window", "segment", "method", "prevalence", "mix"], "draws"),
         "natural": (["arm", "window", "segment", "method"], "draws"),
+        "estimates": (["arm", "window", "segment", "prevalence", "mix", "natural"], "draws"),
         "windows": (["window", "segment"], None),
     },
     "e23_unseen_family": {
-        "claims": (["unit", "case", "composition", "policy", "arm"], "draws"),
-        "blocks": (["unit", "case", "composition", "policy", "window", "segment"], None),
+        "claims": (["stream", "unit", "case", "composition", "policy", "arm"], "draws"),
+        "blocks": (["stream", "unit", "case", "composition", "policy", "window", "segment"], None),
         "windows": (["unit", "window", "segment"], None),
         "units": (["unit"], None),
     },
@@ -70,12 +72,12 @@ SOURCE_KEYS = ("source.run",)
 # the columns of the scorers table that stand beside the certified share in the E5 table
 E5_SCORER_COLUMNS = ["selection_yardstick", "selection_auc", "calibration_auc", "benign_at_miss_pooled",
                      "benign_at_miss_hardest", "ece"]
-# the columns of the E6 table, per unit, case, composition, policy and arm
+# the columns of the E6 table, per stream, unit, case, composition, policy and arm
 E6_COLUMNS = ["alarm_rate", "false_alarm_rate", "alarm_in_unseen_rate", "alarm_in_unseen_violated_rate",
               "alarm_before_unseen_rate", "unseen_violated_rate", "detect_sessions_median", "unseen_leak_median",
               "unseen_attacks_median", "leak_median", "unseen_for_true_mean", "unseen_miss_mean", "miscover_rate",
               "miscover_sequence_rate", "over_bound_rate", "bound_median", "windows_certified_mean"]
-# the columns of the E3 table, per stream, policy, composition and arm of e21
+# the columns of the E3 table, per stream, policy, composition and arm of e21, the burst of the replay among them
 E3_COLUMNS = ["alarm_rate", "false_alarm_rate", "alarm_block_median", "alarm_session_median", "onset_true_rate",
               "onset_true_block_median", "onset_realized_rate", "leak_median", "leak_mean", "excess_median",
               "sessions_median", "dismissed_share_mean", "realized_for_median", "audits_mean", "bound_median",
@@ -267,10 +269,10 @@ def e5_table(pooled: pd.DataFrame, scorers: pd.DataFrame | None, summary: dict) 
 
 
 def e6_table(pooled: pd.DataFrame) -> pd.DataFrame:
-    columns = ["unit", "case", "composition", "policy", "arm", "unseen_segment", "unseen_sessions", "seeds"] + \
-        _stats(pooled, E6_COLUMNS)
-    return pooled.sort_values(["unit", "case", "composition", "policy", "arm"])[[c for c in columns if c in pooled]] \
-        .reset_index(drop=True)
+    columns = ["stream", "unit", "case", "composition", "policy", "arm", "unseen_segment", "unseen_sessions",
+               "seeds"] + _stats(pooled, E6_COLUMNS)
+    order = [c for c in ["stream", "unit", "case", "composition", "policy", "arm"] if c in pooled]
+    return pooled.sort_values(order)[[c for c in columns if c in pooled]].reset_index(drop=True)
 
 
 def e6_windows_table(pooled: pd.DataFrame, summary: dict) -> pd.DataFrame:

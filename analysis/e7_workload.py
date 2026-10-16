@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from forge import paths
-from forge.eval import workload
+from forge.eval import paper, workload
 from forge.experiments.litnet_prevalence import LABELS, MARKERS
 from forge.experiments.monitor_streams import POLICY_LABELS, _policy_line
 from forge.viz import layout, style
@@ -99,8 +99,10 @@ def main() -> None:
     certification = pd.concat([workload.certification(found[n], args.audit_rate) for n in ("e11", "e12")
                                if n in found], ignore_index=True) if any(n in found for n in ("e11", "e12")) \
         else pd.DataFrame()
-    monitoring = pd.concat([workload.monitoring(found[n]) for n in ("e21", "e23") if n in found],
-                           ignore_index=True) if any(n in found for n in ("e21", "e23")) else pd.DataFrame()
+    # a run with both kinds of stream gives the one the paper reads
+    monitoring = paper.paper_rows(pd.concat([workload.monitoring(found[n]) for n in ("e21", "e23") if n in found],
+                                            ignore_index=True)) if any(n in found for n in ("e21", "e23")) \
+        else pd.DataFrame()
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 30)
     if len(certification):

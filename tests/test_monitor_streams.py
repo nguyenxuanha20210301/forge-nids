@@ -5,8 +5,8 @@ from forge import experiments, runs
 from forge.certify.certificate import grid_from, plug_in
 from forge.config import load_config
 from forge.data.synthetic import draw_counts
-from forge.experiments.monitor_streams import (ARMS, MONITORS, POLICIES, STATE_CODES, audited_stream, judge_stream,
-                                               recalibrate, restarted_monitor)
+from forge.experiments.monitor_streams import (ARMS, MONITORS, POLICIES, STATE_CODES, STREAMS, audited_stream,
+                                               judge_stream, recalibrate, restarted_monitor)
 from forge.monitor import rule
 from forge.monitor.sequence import Sequence, Tables
 from forge.paths import configs_dir
@@ -135,44 +135,87 @@ def test_e21_on_an_e11_run(anoshift_signal, tmp_path):
     blocks = runs.load_table(run.dir, "blocks")
     summary = runs.load_json(run.dir, "summary")
     draws = runs.load_arrays(run.dir, "draws")
+    n_draws = cfg11["simulation"]["draws"]
     assert summary["source"]["run"] == run11.run_id and summary["source"]["windows"] == 4
-    assert len(claims) == len(POLICIES) * 2 * len(ARMS) and len(blocks) == len(POLICIES) * 2 * 4
+    assert summary["streams"] == STREAMS and summary["main_stream"] == "replay" and summary["chunk"] == 100
+    assert len(claims) == 2 * len(POLICIES) * 2 * len(ARMS) and len(blocks) == 2 * len(POLICIES) * 2 * 4
     assert set(claims["policy"]) == set(POLICIES) and set(claims["arm"]) == set(ARMS)
+    assert set(claims["stream"]) == set(STREAMS) and set(blocks["stream"]) == set(STREAMS)
     log = (run.dir / "log.txt").read_text()
     assert log.count("online thresholds of the source run reproduced in every window") == 2
-    assert "FORGE-Monitor, largest share of draws leaving the bounds" in log
+    assert "the block histograms of the source run reproduced from the saved scores in every block" in log
+    assert log.count("every attack row of a block kept with probability") == 2
+    for stream in STREAMS:
+        assert f"{stream}, FORGE-Monitor, largest share of draws leaving the bounds" in log
     floor = summary["alarm_floor"]
     assert floor == 20
-    for p in POLICIES:
-        for co in ["typical", "worst"]:
-            key = f"{p}|{co}|"
-            attacks, dismissed = draws[key + "attacks"], draws[key + "dismissed"]
-            ends = np.cumsum(dismissed, axis=0)
-            # no monitoring leaks the whole stream, the monitor at most that, and every alarm comes from the floor on
-            assert (draws[key + "none_leak"] == attacks.sum(0)).all()
-            assert (draws[key + "monitor_leak"] <= draws[key + "none_leak"]).all()
-            for arm in [*MONITORS, "naive", "window_audit"]:
-                pos = draws[key + f"{arm}_alarm_pos"]
-                assert ((pos == -1) | (pos >= floor)).all()
-            # the per window audit alarms at a block end
-            pos = draws[key + "window_audit_alarm_pos"]
-            hit = pos >= 0
-            assert all(pos[d] in ends[:, d] for d in np.flatnonzero(hit))
-            for arm in MONITORS:
-                states = draws[key + f"{arm}_state"]
-                assert states.shape == (4, cfg11["simulation"]["draws"]) and set(np.unique(states)) <= {0, 1, 2}
-                assert (draws[key + f"{arm}_leak"] <= draws[key + "none_leak"]).all()
+    for stream in STREAMS:
+        for p in POLICIES:
+            for co in ["typical", "worst"]:
+                key = f"{stream}|{p}|{co}|"
+                attacks, dismissed = draws[key + "attacks"], draws[key + "dismissed"]
+                ends = np.cumsum(dismissed, axis=0)
+                # no monitoring leaks the whole stream, the monitor at most that, and every alarm comes from the floor
+                # on
+                assert (draws[key + "none_leak"] == attacks.sum(0)).all()
+                assert (draws[key + "monitor_leak"] <= draws[key + "none_leak"]).all()
+                for arm in [*MONITORS, "naive", "window_audit"]:
+                    pos = draws[key + f"{arm}_alarm_pos"]
+                    assert ((pos == -1) | (pos >= floor)).all()
+                # the per window audit alarms at a block end
+                pos = draws[key + "window_audit_alarm_pos"]
+                hit = pos >= 0
+                assert all(pos[d] in ends[:, d] for d in np.flatnonzero(hit))
+                for arm in MONITORS:
+                    states = draws[key + f"{arm}_state"]
+                    assert states.shape == (4, n_draws) and set(np.unique(states)) <= {0, 1, 2}
+                    assert (draws[key + f"{arm}_leak"] <= draws[key + "none_leak"]).all()
+                assert (key + "burst" in draws) == (stream == "replay")
     # a sequence per year over the two deployment years, one per block over the four blocks
     sequences = claims.groupby("arm")["sequences"].first()
     assert sequences["monitor"] == 1 and sequences["monitor_year"] == 2 and sequences["monitor_block"] == 4
     assert summary["restart_sequences"] == {"monitor_year": 2, "monitor_block": 4}
     # the recalibration never tightens, so its mean threshold rises or stays from block to block
-    for co, g in blocks[blocks["policy"] == "recalibration"].groupby("composition"):
+    for (stream, co), g in blocks[blocks["policy"] == "recalibration"].groupby(["stream", "composition"]):
         t = g.sort_values("window")["threshold_mean"].to_numpy()
         assert (np.diff(t) >= -1e-9).all()
     monitor = claims[claims["arm"] == "monitor"]
     assert (monitor["miscover_rate"] <= 0.05 + 0.1).all()
     assert (monitor[["blocks_certified_mean", "blocks_running_mean", "blocks_violation_mean"]].sum(axis=1)
             .sub(4).abs() < 1e-9).all()
+    # the simulated stream of a run with both streams is the one of a run with the simulated stream alone, since the
+    # replay spawns its seeds after it
+    alone = Run(load_config(configs_dir() / "experiments" / "e21_monitor_streams.yaml",
+                            [f"source.run={run11.run_id}", "monitor.epsilon=0.05", "audits.rate=0.2",
+                             "compositions=[{name: typical, prevalence: 0.05}, {name: worst, prevalence: 0.2}]",
+                             "streams=[simulated]"]), root=tmp_path / "alone")
+    module.run(alone.cfg, alone)
+    alone.finish()
+    alone_claims = runs.load_table(alone.dir, "claims")
+    assert "stream" in alone_claims and set(alone_claims["stream"]) == {"simulated"}
+    simulated = claims[claims["stream"] == "simulated"].reset_index(drop=True)
+    assert simulated.equals(alone_claims)
+    alone_draws = runs.load_arrays(alone.dir, "draws")
+    assert all(np.array_equal(alone_draws[k], draws[k]) for k in alone_draws)
+    # the replay keeps every benign session of the block and thins its attacks to the prevalence, so the attacks of
+    # a window at a threshold follow the population FOR of the block as the simulated ones do, and the realized FOR
+    # of the whole stream sits at its population value on average
+    hist = runs.load_arrays(run11.dir, "histograms")
+    for co, pi in (("typical", 0.05), ("worst", 0.2)):
+        for p in ["ltt_iid", "fixed_sel"]:
+            sim = f"simulated|{p}|{co}|"
+            rep = f"replay|{p}|{co}|"
+            assert np.allclose(draws[rep + "for_true"], draws[sim + "for_true"])
+            expected = draws[rep + "for_true"] * draws[rep + "dismissed"]
+            assert np.allclose(draws[rep + "attacks"].mean(1), expected.mean(1), rtol=0.15, atol=3)
+            g = blocks[(blocks["stream"] == "replay") & (blocks["policy"] == p) & (blocks["composition"] == co)]
+            assert (g["burst_max_median"] >= 0).all() and (g["burst_max_high"] >= g["burst_max_median"]).all()
+            # the window keeps every benign session, so the dismissed count is at least the benign count at the
+            # threshold
+            thresholds = runs.load_arrays(run11.dir, "draws")[f"{p}_index"]
+            for w in range(4):
+                benign = np.where(thresholds >= 0, hist["window_benign_below"][w][np.maximum(thresholds, 0)], 0)
+                assert (draws[rep + "dismissed"][w] >= benign).all()
+    assert blocks.loc[blocks["stream"] == "simulated", "burst_max_median"].isna().all()
     for name in module.FIGURES:
         assert (run.dir / "figures" / f"{name}.png").exists() and (run.dir / "figures" / f"{name}.pdf").exists()

@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from forge import runs
+from forge.eval.paper import paper_rows
 from forge.eval.seeds import seed_runs
 
 E19 = "e19_ablations"
@@ -98,7 +99,7 @@ def blaster_table(root=None, base_run=None) -> pd.DataFrame:
     for variant, run_dir, run_id in sources:
         summary = runs.load_json(run_dir, "summary")
         windows = runs.load_table(run_dir, "windows")
-        claims = runs.load_table(run_dir, "claims")
+        claims = paper_rows(runs.load_table(run_dir, "claims"))
         units = [u for u in summary["units"] if u["name"] == BLASTER]
         if not units:
             continue

@@ -38,6 +38,16 @@ score distributions between D_cal and the window.
 the baselines of RQ1 besides Learn then Test claim less. the conformal threshold of Şahin and Mert bounds the miss rate
 on average over the calibration draw, and the threshold of common practice reads the rate off a labeled set without
 any bound.
+
+Learn then Test at a prevalence estimated on the window is the pooled certificate above with the estimate in place of
+pi_max. at a threshold t fixed on D_sel the share of a window's flows at or below it is pi m(t) + (1 - pi) b(t), so
+pi = (b(t) - F_w(t)) / (b(t) - m(t)), the binary form of adjusted classify and count, read from the shares of the
+calibration draw and the unlabeled window. the plug in puts the shares in. the estimate rises with b and m and
+falls with F_w, so an upper bound on b from a two sided DKW event on the benign cdf of the calibration draw, an upper
+Clopper-Pearson bound on m(t) and a lower one sided DKW bound on F_w(t) bound the prevalence from above, and the
+certificate at that bound covers every prevalence up to it, with the lower side of the same benign event as its
+benign bound and the family bound at the rest of delta. it holds under label shift with the calibration mix, since
+m(t) is the miss rate of that mix, and breaks where the window's attacks sit elsewhere at t.
 """
 
 import numpy as np
@@ -237,6 +247,74 @@ def plug_in(benign_below, n_benign, attack_below, n_attack, eps, pi):
     b = np.asarray(benign_below) / np.asarray(n_benign)[..., None]
     m = np.asarray(attack_below) / np.asarray(n_attack)[..., None]
     return fixed_sequence(for_from_rates(pi, m, b) <= eps, 0)
+
+
+ESTIMATE_RULES = ("ks",)
+
+
+def ks_threshold(benign_share, attack_share) -> int:
+    # the grid index at which the benign share and the attack share at or below the threshold differ most, the
+    # point of the Kolmogorov Smirnov statistic, where the denominator of the prevalence estimate is largest
+    return int(np.argmax(np.asarray(benign_share, dtype=float) - np.asarray(attack_share, dtype=float)))
+
+
+def _prevalence_ratio(b, m, f):
+    # (b - f) / (b - m) clipped to the unit interval, 1 where the benign share is at or below the attack share and
+    # nothing can be told
+    b, m, f = (np.asarray(v, dtype=float) for v in (b, m, f))
+    den = b - m
+    out = np.divide(b - f, den, out=np.ones(np.broadcast(b, m, f).shape), where=den > 0)
+    return np.where(den > 0, np.clip(out, 0.0, 1.0), 1.0)
+
+
+def estimate_prevalence(window_below, n_window, benign_below, n_benign, attack_below, n_attack, delta_benign,
+                        delta_window, delta_miss) -> dict:
+    """the prevalence of a window from its unlabeled scores at one threshold fixed in advance, as a plug in and as an
+    upper confidence bound.
+
+    window_below counts the window's flows at or below the threshold out of n_window, benign_below the benign flows
+    of the calibration draw at or below it out of n_benign, attack_below the attacks of the calibration mix out of
+    n_attack, all of shape (...). the upper bound takes the benign share up by the margin of a two sided DKW event
+    at delta_benign, the miss rate up by the Clopper-Pearson bound at delta_miss and the window share down by the
+    one sided DKW margin at delta_window, so it holds with probability at least 1 minus their sum under label shift
+    with the calibration mix. returns the plug in and the upper bound, both in [0, 1].
+    """
+    window_below, n_window, benign_below, n_benign, attack_below, n_attack = (
+        np.asarray(v, dtype=float) for v in (window_below, n_window, benign_below, n_benign, attack_below, n_attack))
+    b = np.divide(benign_below, n_benign, out=np.zeros(np.broadcast(benign_below, n_benign).shape), where=n_benign > 0)
+    m = np.divide(attack_below, n_attack, out=np.zeros(np.broadcast(attack_below, n_attack).shape), where=n_attack > 0)
+    f = np.divide(window_below, n_window, out=np.zeros(np.broadcast(window_below, n_window).shape), where=n_window > 0)
+    b_upper = np.minimum(b + np.asarray(dkw_margin(n_benign, delta_benign / 2)), 1.0)
+    m_upper = np.asarray(clopper_pearson_upper(attack_below, n_attack, delta_miss))
+    f_lower = np.clip(f - np.asarray(dkw_margin(n_window, delta_window)), 0.0, None)
+    return {"plugin": _prevalence_ratio(b, m, f), "upper": _prevalence_ratio(b_upper, m_upper, f_lower)}
+
+
+def estimated_certifier(benign_below, n_benign, attack_below, n_attack, eps, delta_benign, delta_miss,
+                        start="feasible", start_misses=2, start_slack=0.05):
+    """the pooled certificate of certify at a prevalence given per calibration set, for Learn then Test at an
+    estimated prevalence.
+
+    benign_below has shape (..., G) and attack_below the same with the attacks of the calibration mix in one row,
+    n_benign and n_attack shape (...). the benign bound is the lower side of a two sided DKW event at delta_benign,
+    whose upper side serves the estimate, and the family bound takes delta_miss. both depend on the calibration draw
+    alone and are computed once. the function returned takes the prevalence of each calibration set, shape (...),
+    and returns what certify does at that prevalence.
+    """
+    attack_below = np.asarray(attack_below)
+    n_attack = np.asarray(n_attack)
+    m_upper, m_with = _miss_upper(attack_below[..., None, :], n_attack[..., None], delta_miss, start_misses)
+    b_lower = _share_lower(benign_below, n_benign, delta_benign / 2)
+
+    def certify_at(pi):
+        pi = np.asarray(pi, dtype=float)[..., None]
+        bound = for_from_rates(pi, m_upper, b_lower)
+        first = _start([for_from_rates(pi, m[..., None], b_lower) for m in m_with], b_lower, eps, start, start_slack)
+        index = fixed_sequence(bound <= eps, first)
+        return {"index": index, "bound": _take(bound, index, np.nan),
+                "floor": (1 - pi[..., 0]) * _take(b_lower, index, 0.0)}
+
+    return certify_at
 
 
 def min_family_size(eps, pi_max, delta_miss, benign_share) -> int:

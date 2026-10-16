@@ -3,7 +3,8 @@ import numpy as np
 import pytest
 
 from forge import experiments, runs
-from forge.certify.certificate import certify, certify_online, for_from_rates, group_rows, plug_in
+from forge.certify.certificate import (certify, certify_online, estimate_prevalence, estimated_certifier,
+                                       for_from_rates, group_rows, ks_threshold, plug_in)
 from forge.config import load_config
 from forge.data.synthetic import draw_counts
 from forge.eval.metrics import auc
@@ -148,8 +149,8 @@ def test_e11_tables_figures_and_window_rates(anoshift_signal, tmp_path):
         miss = mix_shares(row.mix, own, cal_shares) @ m
         rate = for_from_rates(row.prevalence, miss, b)
         share = row.prevalence * miss + (1 - row.prevalence) * b
-        if row.method == "forge_online":
-            key = "online_index" if row.arm == "real" else "reference_online_index"
+        if row.method in module.PER_WINDOW:
+            key = ("" if row.arm == "real" else "reference_") + module.PER_WINDOW[row.method] + "_index"
             index = draws[key][row.window, prevalences.index(row.prevalence), mixes.index(row.mix)]
         else:
             index = draws[f"{row.method}_index"]
@@ -239,7 +240,52 @@ def test_e11_tables_figures_and_window_rates(anoshift_signal, tmp_path):
                 f"{w.unknown} sessions") in log
     assert "2011 block 0, AUC" not in log
     assert (claims.loc[claims["method"] == "forge_online", "floor_violations"] <= 0.1 * DRAWS).all()
-    assert (claims.loc[~claims["method"].str.startswith("forge"), "floor_violations"] == 0).all()
+    without_floor = ~claims["method"].str.startswith("forge") & ~claims["method"].isin(module.ESTIMATED)
+    assert (claims.loc[without_floor, "floor_violations"] == 0).all()
+
+    # the methods at an estimated prevalence, t_star where the selection shares at the calibration mix differ most,
+    # the estimates per window and draw saved with their thresholds, and the estimates table over draws
+    est = summary["estimate"]
+    cal_shares = cdfs(hist["calibration_benign_below"], hist["calibration_family_below"],
+                      hist["calibration_sizes"])[2]
+    assert est["threshold"] == "ks" and est["t_star"] == ks_threshold(sel_b / sel_n[0], cal_shares @ (
+        sel_f / sel_n[1:, None]))
+    assert np.isclose(est["delta_family"], 0.05 - 0.01 - 0.01 - 0.005)
+    estimates = runs.load_table(run.dir, "estimates")
+    assert len(estimates) == len(claims) // len(methods)
+    assert (estimates["upper_median"] >= estimates["plugin_median"]).all()
+    for key in ["plugin_index", "upper_index", "reference_plugin_index", "reference_upper_index"]:
+        assert draws[key].shape == (len(windows), len(prevalences), len(mixes), DRAWS)
+    assert (draws["upper_prevalence"] >= draws["plugin_prevalence"]).all()
+    # the reference windows keep the calibration distributions, so the upper bound covers the prevalence in most
+    # draws and the plug in sits near it, while the real windows of the fixture drift little
+    reference = estimates[estimates["arm"] == "reference"]
+    assert (reference["upper_under_rate"] <= 0.1).all()
+    assert (np.abs(reference["plugin_median"] - reference["prevalence"]) <= 0.5 * reference["prevalence"] + 0.02).all()
+    # one cell recomputed, the window drawn again from its seed gives the saved estimates and thresholds
+    cells_per_arm = len(windows) * len(prevalences) * len(mixes)
+    seeds = np.random.SeedSequence(cfg["seed"]).spawn(1 + 2 * cells_per_arm)
+    cal = draw_counts(np.random.default_rng(seeds[0]), summary["calibration_sessions"], PI_CAL, cal_shares, b_cal,
+                      m_cal, DRAWS)
+    pooled_below, pooled_n = cal.family_below.sum(1), cal.n_family.sum(1)
+    i, j, k = 1, 1, 0
+    n = round(hist["window_sizes"][i][0] / (1 - prevalences[j]))
+    window = draw_counts(np.random.default_rng(seeds[1 + cells_per_arm + (i * len(prevalences) + j) * len(mixes) + k]),
+                         n, prevalences[j], mix_shares(mixes[k], None, cal_shares) if mixes[k] != "window" else
+                         cdfs(*[hist[f"window_{x}"][i] for x in ("benign_below", "family_below", "sizes")])[2],
+                         b_cal, m_cal, DRAWS)
+    below = window.benign_below + window.family_below.sum(1)
+    t = est["t_star"]
+    out = estimate_prevalence(below[:, t], n, cal.benign_below[:, t], cal.n_benign, pooled_below[:, t], pooled_n,
+                              0.01, 0.01, 0.005)
+    assert np.allclose(out["plugin"], draws["reference_plugin_prevalence"][i, j, k], atol=1e-6)
+    assert np.allclose(out["upper"], draws["reference_upper_prevalence"][i, j, k], atol=1e-6)
+    at = estimated_certifier(cal.benign_below, cal.n_benign, pooled_below, pooled_n, EPS, 0.01, est["delta_family"],
+                             start_misses=cfg["certify"]["start_misses"], start_slack=cfg["certify"]["start_slack"])
+    assert np.array_equal(at(out["plugin"])["index"], draws["reference_plugin_index"][i, j, k])
+    assert np.array_equal(at(out["upper"])["index"], draws["reference_upper_index"][i, j, k])
+    assert "LTT at the estimated prevalence, t_star at grid index" in log
+    assert "estimated prevalence, reference windows, window mix, at prevalence 0.2, plugin median" in log
     # the realized share of attacks among the dismissed sessions of a drawn window follows the true rate, LTT has a
     # true rate far above epsilon at prevalence 0.4 and far below it at 0.05
     ltt = claims[(claims["method"] == "ltt_iid") & (claims["mix"] == "window")].groupby("prevalence")

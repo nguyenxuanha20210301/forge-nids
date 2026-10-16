@@ -221,3 +221,33 @@ def test_e7_monitoring_over_two_seeds_and_the_e3_tables(tmp_path):
     assert set(out) == {"e3_by_policy", "e4_by_cell"}
     assert out["e3_by_policy"]["dataset"].tolist() == ["anoshift"] and out["e4_by_cell"].columns[0] == "dataset"
     assert paper.e3_tables({"e11": {}}) == {}
+
+
+def test_paper_rows_keep_the_replay_where_a_dataset_has_it(tmp_path):
+    t = pd.DataFrame({"dataset": ["anoshift"] * 2 + ["litnet2020"], "stream": ["simulated", "replay", "simulated"],
+                      "policy": ["a", "a", "b"]})
+    kept = paper.paper_rows(t)
+    assert kept["stream"].tolist() == ["replay", "simulated"] and kept["policy"].tolist() == ["a", "b"]
+    assert paper.paper_rows(t.drop(columns=["stream"])).equals(t.drop(columns=["stream"]))
+    one = pd.DataFrame({"stream": ["simulated", "replay"], "x": [1, 2]})
+    assert paper.paper_rows(one)["x"].tolist() == [2]
+    # the monitoring stage pools with the stream among its keys, and the E7 figure draws the replay
+    folders = {}
+    for seed in (0, 1):
+        claims = pd.DataFrame([{"stream": stream, "composition": "typical", "policy": p, "arm": arm,
+                                "dismissed_share_mean": 0.5, "audits_mean": 10.0,
+                                "leak_median": 3.0 + seed + (10.0 if stream == "replay" else 0.0),
+                                "realized_for_median": 1e-4, "alarm_rate": 0.2 if arm == "monitor" else 0.0}
+                               for stream in ("simulated", "replay") for p in ("forge_simplex", "ltt_iid")
+                               for arm in ("monitor", "none")])
+        blocks = pd.DataFrame({"stream": ["simulated"] * 2 + ["replay"] * 2, "composition": ["typical"] * 4,
+                               "window": [0, 1, 0, 1], "window_sessions": [500] * 4})
+        folders[seed] = fake_run(tmp_path, "e21_monitor_streams", f"20261016-00001{seed}_b", {"seed": seed},
+                                 tables=[("claims", claims), ("blocks", blocks)], summary={})
+    table = paper.e7_monitoring(folders)
+    assert set(table["stream"]) == {"simulated", "replay"} and (table["seeds"] == 2).all()
+    row = table[(table["stream"] == "replay") & (table["policy"] == "ltt_iid") & (table["arm"] == "monitor")].iloc[0]
+    assert row["leaked_per_million_median"] == pytest.approx(13.5 / 1000 * 1e6)
+    fig = figures.e7_workload_vs_risk(pd.DataFrame(), table)
+    xs = [line.get_xdata() for line in fig.axes[1].get_lines() if len(line.get_xdata()) == 1]
+    assert all(x[0] >= 10000 for x in xs) and len(xs) == 4

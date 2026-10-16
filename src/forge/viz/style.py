@@ -20,6 +20,9 @@ SEQUENTIAL = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", 
 # every method of the project in one fixed order, which gives each method the same color in every experiment
 METHOD_ORDER = ("forge_simplex", "forge_pooled", "ltt_iid", "forge_strict", "forge_online", "forge_previous",
                 "conformal_fnr", "fixed_sel")
+# the eight slots are taken, so a method that varies another takes its color and is told apart by its marker. LTT
+# at an estimated prevalence, plug in and upper bound, keeps the color of LTT
+COLOR_ALIASES = {"ltt_plugin": "ltt_iid", "ltt_upper": "ltt_iid"}
 
 # single column and double column widths in inches, close to most Elsevier and IEEE templates
 WIDTH_SINGLE = 3.5
@@ -57,8 +60,8 @@ def use() -> None:
 
 
 def color_for(name: str) -> str:
-    # no wrapping around, two methods never share a color
-    return COLORS[METHOD_ORDER.index(name)]
+    # no wrapping around, two methods share a color only through an alias
+    return COLORS[METHOD_ORDER.index(COLOR_ALIASES.get(name, name))]
 
 
 def percent(v, _pos=None) -> str:

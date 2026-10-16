@@ -264,8 +264,8 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
         assert row.few_attacks == bool((attacks[shares > 0] < MIN_ATTACKS).any())
         rate = for_from_rates(row.prevalence, m, b)
         share = row.prevalence * m + (1 - row.prevalence) * b
-        if row.method == "forge_online":
-            index = saved["online_index"][ARMS.index(row.arm), i, j, k]
+        if row.method in module.PER_WINDOW:
+            index = saved[f"{module.PER_WINDOW[row.method]}_index"][ARMS.index(row.arm), i, j, k]
         else:
             index = saved[f"{row.method}_index"]
         hit = index >= 0
@@ -334,6 +334,8 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
                                    **start)
             assert np.array_equal(again["index"], saved["natural_online_index"][i])
             index = saved["natural_online_index"][i]
+        elif row.method in module.PER_WINDOW:
+            index = saved[f"natural_{module.PER_WINDOW[row.method]}_index"][i]
         else:
             index = saved[f"{row.method}_index"]
         hit = index >= 0
@@ -380,7 +382,19 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
     assert (main.loc[main["method"] == "ltt_iid", "rate"] > 0.5).mean() > 0.5
     assert covered.loc[covered["method"] == "forge_simplex", "rate"].max() <= 0.1
     assert (claims.loc[claims["refused"] == 1, "violations"] == 0).all()
-    assert (claims.loc[~claims["method"].str.startswith("forge"), "floor_violations"] == 0).all()
+    without_floor = ~claims["method"].str.startswith("forge") & ~claims["method"].isin(module.ESTIMATED)
+    assert (claims.loc[without_floor, "floor_violations"] == 0).all()
+    # the estimates per window, the natural windows among them, and the saved arrays of the two estimated methods
+    estimates = runs.load_table(run.dir, "estimates")
+    assert len(estimates[~estimates["natural"]]) == len(claims) // len(methods)
+    assert len(estimates[estimates["natural"]]) == len(natural) // len(methods)
+    assert (estimates["upper_median"] >= estimates["plugin_median"]).all()
+    assert saved["plugin_index"].shape == saved["online_index"].shape and "natural_upper_prevalence" in saved
+    # a reference window of one family at the calibration mix keeps the calibration distributions, so the upper
+    # bound covers its prevalence in most draws, while a window of one family alone moves the estimate
+    at_mix = estimates[(estimates["arm"] == "reference") & (estimates["mix"] == "calibration")]
+    assert (at_mix["upper_under_rate"] <= 0.1).all()
+    assert summary["estimate"]["t_star"] == int(np.argmax(b_sel - shares_cal @ m_sel))
 
     log = (run.dir / "log.txt").read_text()
     for arm in ARMS:

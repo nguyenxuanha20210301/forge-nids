@@ -71,10 +71,13 @@ def monitoring(run_dir, control=None) -> pd.DataFrame:
         dataset = "anoshift"
     sessions = blocks.drop_duplicates(["composition", "window"]).groupby("composition")["window_sessions"].sum()
     rows = []
+    # a run with both kinds of stream keeps the stream beside the policy and the arm
     for r in claims.itertuples():
         total = float(sessions[r.composition])
         dismissed_share = r.dismissed_share_mean
-        rows.append({"dataset": dataset, "stage": "monitoring", "composition": r.composition, "policy": r.policy,
+        rows.append({"dataset": dataset, "stage": "monitoring",
+                     **({"stream": r.stream} if "stream" in claims else {}),
+                     "composition": r.composition, "policy": r.policy,
                      "arm": r.arm, "sessions": total, "dismissed": dismissed_share,
                      "escalations_per_million": (1 - dismissed_share) * MILLION,
                      "audits_per_million": r.audits_mean / total * MILLION,

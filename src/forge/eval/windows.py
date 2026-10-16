@@ -79,12 +79,14 @@ def every_mix_threshold(pi_max, m_family, b, groups, shares, eps) -> int:
 def evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below, eps, values, cell) -> list[dict]:
     # one row per method for one window, prevalence and mix. the true rate and dismissed share follow from the cdfs of
     # the window's population at the grid, the realized share of attacks among the dismissed sessions from the drawn
-    # window
+    # window. online holds the thresholds fixed per draw and window, the online certificate alone or a dict of such
+    # methods by name, the others come from offline
     true_rate = for_from_rates(pi, m_w, b_w)
     true_share = pi * m_w + (1 - pi) * b_w
+    per_window = {} if online is None else online if "index" not in online else {"forge_online": online}
     rows = []
     for method in methods:
-        out = online if method == "forge_online" else offline[method]
+        out = per_window[method] if method in per_window else offline[method]
         hit = out["index"] >= 0
         safe = np.maximum(out["index"], 0)
         rate = np.where(hit, true_rate[safe], 0.0)

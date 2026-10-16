@@ -63,3 +63,22 @@ def test_monitoring_workload_and_frontier(tmp_path):
     assert front["policy"].tolist() == ["forge_simplex", "ltt_iid"] and front["arm"].tolist() == ["monitor", "none"]
     front = workload.frontier(pd.DataFrame({"c": [3.0, 2.0, 1.0], "r": [0.0, 0.0, 0.5]}), "c", "r")
     assert front["c"].tolist() == [2.0, 1.0]
+
+
+def test_monitoring_keeps_the_stream_of_a_run_with_both_kinds(tmp_path):
+    root = tmp_path / "runs" / "e21_monitor_streams" / "r2"
+    (root / "results").mkdir(parents=True)
+    claims = pd.DataFrame({
+        "stream": ["simulated", "replay"] * 2, "policy": ["forge_simplex"] * 2 + ["ltt_iid"] * 2,
+        "composition": ["typical"] * 4, "arm": ["monitor"] * 4, "dismissed_share_mean": [0.5, 0.5, 0.3, 0.3],
+        "audits_mean": [500.0] * 4, "leak_median": [100.0, 120.0, 300.0, 350.0], "realized_for_median": [0.001] * 4,
+        "alarm_rate": [0.0, 0.0, 1.0, 1.0], "excess_median": [-50.0] * 4,
+    })
+    blocks = pd.DataFrame({"stream": ["simulated", "replay"] * 2, "policy": ["forge_simplex"] * 2 + ["ltt_iid"] * 2,
+                           "composition": ["typical"] * 4, "window": [0, 0, 1, 1], "window_sessions": [60000] * 4})
+    claims.to_parquet(root / "results" / "claims.parquet", index=False)
+    blocks.to_parquet(root / "results" / "blocks.parquet", index=False)
+    (root / "results" / "summary.json").write_text(json.dumps({"epsilon": 0.001}), encoding="utf-8")
+    table = workload.monitoring(root)
+    assert table["stream"].tolist() == ["simulated", "replay"] * 2 and (table["sessions"] == 120000).all()
+    assert np.isclose(table.loc[1, "leaked_per_million"], 1000.0)

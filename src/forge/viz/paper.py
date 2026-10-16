@@ -14,6 +14,7 @@ from forge.experiments.litnet_prevalence import EVERY_LINE, LABELS, MARKERS, MET
 from forge.experiments.monitor_streams import POLICY_LABELS, _policy_line
 from forge.experiments.scorer_comparison import _line as scorer_line
 from forge.experiments.unseen_family import ARM_LABELS, _arm_line
+from forge.eval.paper import paper_rows
 from forge.viz import layout, prevalence, style
 from forge.viz.prevalence import BEST_LINES
 
@@ -135,7 +136,8 @@ def e6_leakage_by_family(table: pd.DataFrame, windows: pd.DataFrame, policy: str
     units = list(dict.fromkeys(windows["unit"]))
     labels = windows.drop_duplicates("unit").set_index("unit")["segment"].reindex(units)
     compositions = list(dict.fromkeys(table["composition"]))
-    t = table[(table["case"] == "unseen") & (table["policy"] == policy)]
+    t = paper_rows(table)
+    t = t[(t["case"] == "unseen") & (t["policy"] == policy)]
     arms = [a for a in E6_ARMS if a in set(t["arm"])]
     fig, axes = plt.subplots(2, len(compositions), figsize=(style.WIDTH_DOUBLE, 4.4), sharex=True, squeeze=False)
     x = np.arange(len(units))
@@ -171,9 +173,10 @@ def e7_workload_vs_risk(certification: pd.DataFrame, monitoring: pd.DataFrame) -
     typical composition, the workload of every policy under the monitor of the paper's rule, filled, and without
     monitoring, hollow, against the attacks let through per million flows. one column per dataset."""
     style.use()
-    # a stage the tables lack comes as an empty frame and leaves its row of panels blank
+    # a stage the tables lack comes as an empty frame and leaves its row of panels blank, and the monitoring stage
+    # shows the stream the paper reads
     certification = _with_columns(certification, ["dataset", "mix", "main", "policy"])
-    monitoring = _with_columns(monitoring, ["dataset", "composition", "arm", "policy"])
+    monitoring = paper_rows(_with_columns(monitoring, ["dataset", "composition", "arm", "policy"]))
     datasets = [d for d in DATASET_LABELS if d in set(certification["dataset"]) or d in set(monitoring["dataset"])]
     fig, axes = plt.subplots(2, max(len(datasets), 1), figsize=(style.WIDTH_DOUBLE, 5.2), squeeze=False)
     sticks = {}

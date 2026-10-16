@@ -10,10 +10,14 @@ known are the control, the case known against the case unseen. every unit draws 
 with the seeds of the e12 run, so a unit and its control differ in the scorer and the certificate only, and the
 control is checked against the thresholds and window sizes the e12 run saved.
 
-the streams, the threshold policies and the monitors are those of e21 with uniform audits. a stream is the dismissed
-flows of one threshold policy through the windows, every dismissed flow an attack with the FOR of the window's
-population at the threshold and audited with probability q. a window holds attacks of its own family only, so the
-attacks of the held out family dismissed until the switch off are the count inside its window at the alarm.
+the streams, the threshold policies and the monitors are those of e21 with uniform audits, in both kinds of stream.
+on the simulated stream every dismissed flow is an attack with the FOR of the window's population at the threshold
+and audited with probability q. on the replay the flows of the test part run in their real order, every benign flow
+kept and every attack kept with the probability that gives the window's prevalence, or all of them kept and the
+benign flows thinned where the test part is short of attacks, as the real windows of e12 are built, dismissed at
+the threshold with their real labels and audited with probability q, see forge.monitor.replay. a window holds
+attacks of its own family only, so the attacks of the held out family dismissed until the switch off are the count
+inside its window at the alarm.
 
 monitors, the arms on every stream.
     monitor          FORGE-Monitor with one sequence for the deployment
@@ -24,13 +28,16 @@ monitors, the arms on every stream.
     window_audit     the per window audit, a Clopper-Pearson bound at delta over the windows read at the window's end
     naive            the running Horvitz Thompson estimate against epsilon times the dismissed count, no bound
 
-counted per unit, case, composition, policy and arm as in e21, and for the window of the held out family the share of
-draws alarmed inside it, before it and after it, the same share among the draws in which the window violates epsilon,
-the dismissed sessions of the window until the alarm, the attacks of the family dismissed until the switch off against
-all of them, and the population FOR and the miss rate of the family at the policy's threshold. per unit the scorer
-and the certificates, and per unit and window the AUC and the rates at the offline FORGE thresholds. figures
-bounds_over_time, for_by_family, alarm_by_family, leakage_by_family and leakage_by_arm.
+counted per stream, unit, case, composition, policy and arm as in e21, and for the window of the held out family the
+share of draws alarmed inside it, before it and after it, the same share among the draws in which the window violates
+epsilon, the dismissed sessions of the window until the alarm, the attacks of the family dismissed until the switch
+off against all of them, and the population FOR and the miss rate of the family at the policy's threshold. per unit
+the scorer and the certificates, and per unit and window the AUC and the rates at the offline FORGE thresholds, and
+on the replay per window the largest number of attacks among any 1 / epsilon consecutive dismissed flows. figures
+bounds_over_time, for_by_family, alarm_by_family, leakage_by_family and leakage_by_arm, one row of panels per stream.
 """
+
+import string
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -48,10 +55,13 @@ from forge.eval.metrics import auc, share_with_interval
 from forge.experiments.litnet_prevalence import ARMS as E12_ARMS
 from forge.experiments.litnet_prevalence import (calibration_shares, fit_scorer, in_claim, load_flows, score_rows,
                                                  segment_table, split_flows)
-from forge.experiments.monitor_streams import (OFFLINE, POLICIES, POLICY_LABELS, STATE_CODES, _policy_line,
-                                               _quantiles, _with_prefix, audited_stream, judge_stream, recalibrate)
+from forge.experiments.monitor_streams import (OFFLINE, POLICIES, POLICY_LABELS, STATE_CODES, STREAM_LABELS, STREAMS,
+                                               _policy_line, _quantiles, _with_prefix, audited_stream, judge_stream,
+                                               main_stream, of_stream, recalibrate)
 from forge.experiments.monitor_sweep import any_start_monitor
 from forge.monitor import rule
+from forge.monitor.replay import (assemble_stream, block_rows, check_block, dismissed_stream, thin, thin_rates,
+                                  window_counts)
 from forge.monitor.sequence import KINDS, Sequence, Tables
 from forge.viz import layout, style
 from forge.viz.export import save_figure
@@ -185,6 +195,9 @@ def fit_unit(unit: dict, flows: pd.DataFrame, split: dict, segments: pd.DataFram
     used = np.flatnonzero((part >= 1) & kept)
     score = score_rows(booster, enc, flows, used)
     u_part, u_segment, u_code, u_label, u_known = part[used], segment[used], code[used], label[used], ~drop[used]
+    # the test rows in table order, the real order of every test part, for the replayed streams
+    test = u_part == 3
+    rows = {"score": score[test], "segment": u_segment[test], "code": u_code[test]}
     sel_mask, cal_mask = (u_part == 1) & u_known, (u_part == 2) & u_known
     sel_auc, cal_auc = auc(score[sel_mask], u_label[sel_mask]), auc(score[cal_mask], u_label[cal_mask])
     grid = grid_from(score[(u_part == 1) & (u_code == 0)], c["grid_size"], c.get("grid_tail", []))
@@ -218,6 +231,14 @@ def fit_unit(unit: dict, flows: pd.DataFrame, split: dict, segments: pd.DataFram
     grouped_below, grouped_n = group_rows(cal.family_below, cal.n_family, groups)
     pooled_below, pooled_n = cal.family_below.sum(1), cal.n_family.sum(1)
     args = (eps, delta, pi_max, part_b)
+    certifiers = {}
+
+    def certifier_of(d: slice):
+        # the online certifier of a chunk of calibration draws, built once per chunk, for the replayed windows
+        if (d.start, d.stop) not in certifiers:
+            certifiers[(d.start, d.stop)] = online_certifier(grouped_below[d], grouped_n[d], *args, **start)
+        return certifiers[(d.start, d.stop)]
+
     ltt_start = {"n": cal.n_benign + pooled_n, **start} if c.get("ltt_guarded_start", False) else {}
     offline = {
         "forge_simplex": certify(cal.benign_below, cal.n_benign, grouped_below, grouped_n, *args, **start)["index"],
@@ -242,12 +263,13 @@ def fit_unit(unit: dict, flows: pd.DataFrame, split: dict, segments: pd.DataFram
         "cal_counts": cal_counts, "windows": windows, "test_auc": test_auc, "shares_cal": shares_cal, "n_cal": n_cal,
         "expected": expected, "minimum": minimum, "groups": groups, "merged": merged, "fixed": fixed, "beta": beta,
         "fixed_benign": float(b_sel[fixed]) if fixed >= 0 else 0.0, "offline": offline,
-        "certify_window": online_certifier(grouped_below, grouped_n, *args, **start),
+        "certify_window": online_certifier(grouped_below, grouped_n, *args, **start), "certifier_of": certifier_of,
         "offline_benign": {p: float(np.where(index >= 0, b_cal[np.maximum(index, 0)], 0.0).mean())
                            for p, index in offline.items()},
         "forge_benign": float(at_forge(b_cal)),
         "forge_miss": {f: float(v) if not h else np.nan for f, v, h in zip(families, at_forge(m_cal_family), held)},
-        "at_forge": at_forge, "counts": np.column_stack([cal.n_benign, cal.n_family]), "cache": {},
+        "at_forge": at_forge, "counts": np.column_stack([cal.n_benign, cal.n_family]), "cache": {}, "rows": rows,
+        "blocks": {},
     }
 
 
@@ -262,15 +284,21 @@ def run(cfg: dict, run: runs.Run) -> None:
     if not 0 < q <= 1:
         raise ValueError(f"the audit rate is {q}, expected a probability above 0")
     policies, arms, compositions = list(cfg["policies"]), list(cfg["arms"]), list(cfg["compositions"])
-    unknown = (set(policies) - set(POLICIES)) | (set(arms) - set(ARMS))
+    streams = list(cfg.get("streams", ["simulated"]))
+    unknown = (set(policies) - set(POLICIES)) | (set(arms) - set(ARMS)) | (set(streams) - set(STREAMS))
     if unknown:
-        raise ValueError(f"unknown policies or arms {', '.join(sorted(unknown))}")
+        raise ValueError(f"unknown policies, arms or streams {', '.join(sorted(unknown))}")
+    if not streams or len(set(streams)) != len(streams):
+        raise ValueError(f"streams are {streams}, expected some of {', '.join(STREAMS)}, each once")
     names = [co["name"] for co in compositions]
     if len(set(names)) != len(names):
         raise ValueError("every composition needs its own name")
     trace = sim["trace"]
     if trace["unit"] not in cfg["units"] or trace["policy"] not in policies or trace["composition"] not in names:
         raise ValueError("the trace names a unit, policy or composition that is not run")
+    chunk = int(sim.get("chunk", 50))
+    if chunk < 1:
+        raise ValueError(f"chunk is {chunk}, expected 1 or more draws")
 
     source = load_source(cfg)
     cfg12, ssum, sdraws, sclaims = (source[key] for key in ("cfg", "summary", "draws", "claims"))
@@ -300,7 +328,8 @@ def run(cfg: dict, run: runs.Run) -> None:
     label, segment, part, families = split["label"], split["segment"], split["part"], split["families"]
     run.log(f"source {cfg['source']['experiment']} run {cfg['source']['run']}, {d['name']} {d['processed_version']}, "
             f"fingerprint {manifest['fingerprint']}, {len(flows)} flows, {int(label.sum())} attacks, "
-            f"{flows['capture'].nunique()} captures, {draws} draws, families {', '.join(families)}")
+            f"{flows['capture'].nunique()} captures, {draws} draws, families {', '.join(families)}, streams "
+            + ", ".join(streams))
     cuts = segment_table(flows, segment, part, filtered)
     for col in ["flows", "benign", "attacks"]:
         if not np.array_equal(cuts[col].to_numpy(), source["cuts"][col].to_numpy()):
@@ -335,7 +364,13 @@ def run(cfg: dict, run: runs.Run) -> None:
             for scorer in (CONTROL, unit["name"]):
                 if (scorer, vector_of(unit, co)) not in stream_keys:
                     stream_keys.append((scorer, vector_of(unit, co)))
-    stream_seeds = np.random.SeedSequence(cfg["seed"]).spawn(len(stream_keys) * len(policies))
+    # the coins of the simulated stream take the first children of the seed, as they did before the replay, and the
+    # replay spawns its own after them, one per stream key and window for the thinning and one per stream key and
+    # policy for the coins
+    seed_sequence = np.random.SeedSequence(cfg["seed"])
+    stream_seeds = seed_sequence.spawn(len(stream_keys) * len(policies))
+    thin_seeds = seed_sequence.spawn(len(stream_keys) * w_count) if "replay" in streams else []
+    coin_seeds = seed_sequence.spawn(len(stream_keys) * len(policies)) if "replay" in streams else []
     (run.results / "models").mkdir()
 
     def window_draw(unit_fit, i, pi):
@@ -370,8 +405,107 @@ def run(cfg: dict, run: runs.Run) -> None:
         unit_fit["cache"][key] = out
         return out
 
-    def monitor_vector(unit_fit, vector, seed_base):
-        # the thresholds, the streams and the arms of every policy through the windows at the prevalences of vector
+    def replay_block(unit_fit, i):
+        # the test part of segment i in its real order under the unit's scorer, checked against its window counts
+        if i not in unit_fit["blocks"]:
+            rows = unit_fit["rows"]
+            mine = rows["segment"] == segments["segment"][i]
+            block = block_rows(rows["score"][mine], rows["code"][mine], unit_fit["grid"])
+            win = unit_fit["windows"][i]
+            if not check_block(block, unit_fit["grid"], win["benign_below"], win["family_below"], win["sizes"],
+                               rows["code"][mine]):
+                raise ValueError(f"the test rows of {segments['label'][i]} do not give its window counts")
+            unit_fit["blocks"][i] = block
+        return unit_fit["blocks"][i]
+
+    def replayed_vector(unit_fit, vector, thin_rngs, coin_rngs):
+        # the same on the replayed stream, the test part of every window in its real order thinned to the prevalence
+        # of vector, a chunk of draws at a time, the online certificate and the recalibration refit reading the
+        # replayed window's own counts
+        g = len(unit_fit["grid"])
+        floor = rule.alarm_floor(eps)
+        index = {p: np.full((w_count, draws), -1, dtype=np.int64) for p in policies}
+        counted = {name: {p: np.zeros((w_count, draws), dtype=np.int64) for p in policies}
+                   for name in ("dismissed", "attacks", "audited_attacks", "audited_benign", "burst")}
+        rate = {p: np.zeros((w_count, draws)) for p in policies}
+        miss = {p: np.zeros((w_count, draws)) for p in policies}
+        benign = {p: np.zeros((w_count, draws)) for p in policies}
+        parts = {p: [] for p in policies}
+        offset = {p: np.zeros(draws, dtype=np.int64) for p in policies}
+        before = {p: np.zeros(draws, dtype=np.int64) for p in policies}
+        n_window = np.zeros(w_count, dtype=np.int64)
+        subsampled = np.zeros(w_count, dtype=bool)
+        kept = np.zeros((w_count, 2))
+        recal = np.full(draws, unit_fit["fixed"], dtype=np.int64)
+        for w, (i, pi) in enumerate(zip(window_segments, vector)):
+            block = replay_block(unit_fit, i)
+            win = unit_fit["windows"][i]
+            b_w, m_w_family, _, own = judge.rates(win)
+            test_attacks = win["sizes"][1:]
+            n_w, sub = window_size(int(win["sizes"][0]), test_attacks, pi, own, dep12["subsample_benign"])
+            if n_w == 0:
+                raise ValueError(f"the test part of {segments['label'][i]} lacks the attacks of a window at "
+                                 f"prevalence {pi}")
+            n_window[w], subsampled[w] = n_w, sub
+            kept[w] = thin_rates(int(win["sizes"][0]), int(test_attacks.sum()), n_w, pi, sub)
+            m_mix = own @ m_w_family
+            curve = for_from_rates(pi, m_mix, b_w)
+            for lo in range(0, draws, chunk):
+                d = slice(lo, min(lo + chunk, draws))
+                th = thin(thin_rngs[w], block, kept[w, 0], kept[w, 1], d.stop - d.start)
+                attack_below, benign_below = window_counts(block, th, g)
+                window_below = benign_below + attack_below
+                n_w_d = th.n_benign + th.n_attacks
+                online = None
+                if "forge_online" in policies:
+                    online = np.asarray(unit_fit["certifier_of"](d)(window_below, n_w_d)["index"], dtype=np.int64)
+                for p in policies:
+                    if p == "forge_online":
+                        t = online
+                    elif p == "recalibration":
+                        t = recal[d]
+                    else:
+                        t = unit_fit["offline"][p][d]
+                    out = dismissed_stream(coin_rngs[p], block, th, t, q, floor)
+                    hit, safe = t >= 0, np.maximum(t, 0)
+                    index[p][w, d] = t
+                    rate[p][w, d] = np.where(hit, curve[safe], 0.0)
+                    miss[p][w, d] = np.where(hit, m_mix[safe], 0.0)
+                    benign[p][w, d] = np.where(hit, b_w[safe], 0.0)
+                    for name in counted:
+                        counted[name][p][w, d] = out[name]
+                    rows = out["ev_row"] + lo
+                    parts[p].append((rows, out["ev_pos"] + offset[p][rows], out["ev_count"] + before[p][rows], w))
+                    offset[p][d] += out["dismissed"]
+                    before[p][d] += out["attacks"]
+                if "recalibration" in policies:
+                    recal[d] = recalibrate(window_below, attack_below, n_w_d, th.n_attacks, recal[d], pi_cal, eps)
+        results = {"n_window": n_window, "subsampled": subsampled, "kept": kept}
+        for p in policies:
+            stream = assemble_stream(draws, parts[p], counted["dismissed"][p], counted["attacks"][p],
+                                     counted["audited_attacks"][p], counted["audited_benign"][p])
+            out = judge_stream(tables, stream, rate[p], eps, delta, q, restarts)
+            if "monitor_any" in arms:
+                out["monitor_any"] = any_start_monitor(per_tables, stream, eps)
+            results[p] = {"stream": stream, "out": out, "index": index[p], "dismissed": counted["dismissed"][p],
+                          "rate": rate[p], "miss": miss[p], "benign": benign[p], "burst": counted["burst"][p]}
+        return results
+
+    def monitor_vector(unit_fit, vector, key_index):
+        # the streams of every kind of one unit at the prevalences of vector, keyed by the kind
+        out = {}
+        base = key_index * len(policies)
+        if "simulated" in streams:
+            out["simulated"] = simulated_vector(unit_fit, vector, base)
+        if "replay" in streams:
+            thin_rngs = [np.random.default_rng(thin_seeds[key_index * w_count + w]) for w in range(w_count)]
+            coin_rngs = {p: np.random.default_rng(coin_seeds[base + pj]) for pj, p in enumerate(policies)}
+            out["replay"] = replayed_vector(unit_fit, vector, thin_rngs, coin_rngs)
+        return out
+
+    def simulated_vector(unit_fit, vector, seed_base):
+        # the thresholds, the streams and the arms of every policy through the windows at the prevalences of vector,
+        # on the simulated stream, the windows drawn with the seeds of e12
         index = {p: np.full((w_count, draws), -1, dtype=np.int64) for p in policies}
         dismissed = {p: np.zeros((w_count, draws), dtype=np.int64) for p in policies}
         rate = {p: np.zeros((w_count, draws)) for p in policies}
@@ -407,11 +541,10 @@ def run(cfg: dict, run: runs.Run) -> None:
             if "monitor_any" in arms:
                 out["monitor_any"] = any_start_monitor(per_tables, stream, eps)
             results[p] = {"stream": stream, "out": out, "index": index[p], "dismissed": dismissed[p],
-                          "rate": rate[p], "miss": miss[p], "benign": benign[p]}
+                          "rate": rate[p], "miss": miss[p], "benign": benign[p], "burst": None}
         return results
 
-    unit_rows, window_rows, claim_rows, block_rows, saved, hist = [], [], [], [], {}, {}
-    kept_trace = None
+    unit_rows, window_rows, claim_rows, block_rows_, saved, hist, traces = [], [], [], [], {}, {}, {}
     fits = {}
     computed = {}
 
@@ -481,22 +614,27 @@ def run(cfg: dict, run: runs.Run) -> None:
         hist[prefix + "counts"] = fit["counts"]
         return fit
 
-    def cell_rows(res, unit, case, co, vector):
-        # the rows of claims and blocks of one unit, case and composition, and the saved arrays of every policy
+    def cell_rows(by_stream, unit, case, co, vector):
+        # the rows of claims and blocks of one unit, case and composition on every stream, and the saved arrays of
+        # every policy
+        for stream_name in streams:
+            stream_rows(by_stream[stream_name], stream_name, unit, case, co, vector)
+
+    def stream_rows(res, stream_name, unit, case, co, vector):
         w_u = positions[unit["name"]]
         n_window, subsampled = res["n_window"], res["subsampled"]
         total_windows = int(n_window.sum())
         for p in policies:
             r_p = res[p]
-            stream, out = r_p["stream"], r_p["out"]
+            stream, out, burst = r_p["stream"], r_p["out"], r_p["burst"]
             dismissed, rate, miss = r_p["dismissed"], r_p["rate"], r_p["miss"]
             n_end = stream["offsets"][-1]
             held = dismissed > 0
             for w in range(w_count):
                 h = held[w]
-                block_rows.append({
-                    "unit": unit["name"], "case": case, "composition": co["name"], "policy": p, "window": w,
-                    "segment": labels[w], "unseen": w == w_u, "prevalence": vector[w],
+                block_rows_.append({
+                    "stream": stream_name, "unit": unit["name"], "case": case, "composition": co["name"],
+                    "policy": p, "window": w, "segment": labels[w], "unseen": w == w_u, "prevalence": vector[w],
                     "window_sessions": int(n_window[w]), "benign_subsampled": bool(subsampled[w]),
                     "refused_rate": float(np.mean(~h)),
                     "threshold_mean": float(r_p["index"][w][h].mean()) if h.any() else np.nan,
@@ -509,6 +647,8 @@ def run(cfg: dict, run: runs.Run) -> None:
                     "attacks_mean": float(stream["attacks"][w].mean()),
                     "realized_for_mean": float(np.mean(stream["attacks"][w][h] / dismissed[w][h])) if h.any()
                     else np.nan,
+                    "burst_max_median": float(np.median(burst[w])) if burst is not None else np.nan,
+                    "burst_max_high": float(np.quantile(burst[w], 0.95)) if burst is not None else np.nan,
                     **{f"state_{name}": float(np.mean(out["monitor"]["state"][w] == code))
                        for name, code in STATE_CODES.items()},
                     "window_audit_alarm_rate": float(out["window_audit"]["block_alarm"][w].mean()),
@@ -530,17 +670,19 @@ def run(cfg: dict, run: runs.Run) -> None:
                       "unseen_for_true_mean": float(rate[w_u][h_u].mean()) if h_u.any() else np.nan,
                       "unseen_miss_mean": float(miss[w_u][h_u].mean()) if h_u.any() else np.nan,
                       "unseen_violated_rate": float(np.mean(h_u & (rate[w_u] > eps)))}
-            key = f"{unit['name']}|{case}|{co['name']}|{p}|"
+            key = f"{unit['name']}|{case}|{co['name']}|{stream_name}|{p}|"
             saved[key + "attacks"] = stream["attacks"]
             saved[key + "dismissed"] = dismissed
             saved[key + "for_true"] = rate.astype(np.float32)
+            if burst is not None:
+                saved[key + "burst"] = burst
             for arm in arms:
                 r = out[arm]
                 alarmed = r["alarmed"]
                 um = unseen_metrics(r, stream, w_u)
                 row = {
-                    "unit": unit["name"], "case": case, "composition": co["name"], "policy": p, "arm": arm,
-                    "draws": draws, "refused_rate": float(np.mean(n_end == 0)),
+                    "stream": stream_name, "unit": unit["name"], "case": case, "composition": co["name"],
+                    "policy": p, "arm": arm, "draws": draws, "refused_rate": float(np.mean(n_end == 0)),
                     "stream_sessions_mean": float(n_end.mean()), "alarm_rate": float(alarmed.mean()),
                     "false_alarm_rate": float(r["false_alarm"].mean()),
                     **_with_prefix("alarm_window", _quantiles(r["alarm_block"] + 1, alarmed)),
@@ -591,7 +733,8 @@ def run(cfg: dict, run: runs.Run) -> None:
                     saved[key + f"{arm}_state"] = r["state"]
                     saved[key + f"{arm}_bound"] = r["bound"]
             by_arm = {x["arm"]: x for x in claim_rows[-len(arms):]}
-            line = (f"{unit['name']} {case}, composition {co['name']}, {p}, the window of the family at prevalence "
+            line = (f"{stream_name}, {unit['name']} {case}, composition {co['name']}, {p}, the window of the family "
+                    "at prevalence "
                     f"{vector[w_u]} with {unseen['unseen_sessions']} sessions, FOR "
                     f"{unseen['unseen_for_true_mean']:.5f} and miss rate {unseen['unseen_miss_mean']:.4f} at the "
                     "threshold, "
@@ -616,9 +759,10 @@ def run(cfg: dict, run: runs.Run) -> None:
     control = fit_and_log({"name": CONTROL, "families": []})
     for scorer, vector in stream_keys:
         if scorer == CONTROL:
-            computed[(scorer, vector)] = monitor_vector(control, vector, stream_keys.index((scorer, vector))
-                                                        * len(policies))
+            computed[(scorer, vector)] = monitor_vector(control, vector, stream_keys.index((scorer, vector)))
     control["cache"].clear()
+    control["blocks"].clear()
+    control["rows"] = None
     for unit in units:
         fit = fit_and_log(unit)
         w_u = positions[unit["name"]]
@@ -635,34 +779,40 @@ def run(cfg: dict, run: runs.Run) -> None:
         for co in compositions:
             vector = vector_of(unit, co)
             key = (unit["name"], vector)
-            computed[key] = monitor_vector(fit, vector, stream_keys.index(key) * len(policies))
+            computed[key] = monitor_vector(fit, vector, stream_keys.index(key))
             cell_rows(computed[key], unit, "unseen", co, vector)
             cell_rows(computed[(CONTROL, vector)], unit, "known", co, vector)
             if unit["name"] == trace["unit"] and co["name"] == trace["composition"]:
-                res = computed[key]
-                kept_trace = {**res[trace["policy"]]["out"]["trace"], "window_sessions": res["n_window"],
-                              "unseen": w_u}
+                for stream_name in streams:
+                    res = computed[key][stream_name]
+                    traces.update({f"{stream_name}|{k}": v for k, v in
+                                   {**res[trace["policy"]]["out"]["trace"], "window_sessions": res["n_window"],
+                                    "unseen": w_u}.items()})
             computed.pop(key)
         fit["cache"].clear()
+        fit["blocks"].clear()
+        fit["rows"] = None
 
     claims = pd.DataFrame(claim_rows)
     run.save_table(claims, "claims")
-    run.save_table(pd.DataFrame(block_rows), "blocks")
+    run.save_table(pd.DataFrame(block_rows_), "blocks")
     run.save_table(pd.DataFrame(unit_rows), "units")
     run.save_table(pd.DataFrame(window_rows), "windows")
     run.save_arrays("draws", **saved)
     run.save_arrays("histograms", **hist)
-    run.save_arrays("trace", **kept_trace)
+    run.save_arrays("trace", **traces)
     exceeds = {}
-    for arm in [a for a in MONITORS if a in arms]:
-        g = claims[claims["arm"] == arm]
-        worst = g.loc[g["miscover_rate"].idxmax()]
-        exceeds[arm] = bool((g["miscover_low"] > delta).any())
-        run.log(f"{ARM_SHORT[arm]}, largest share of draws leaving the bounds {worst['miscover_rate']:.4f} on "
-                f"{worst['policy']} with {worst['unit']} {worst['case']} at composition {worst['composition']}, 95% "
-                f"interval {worst['miscover_low']:.4f} to {worst['miscover_high']:.4f}, delta {delta}, above delta "
-                f"beyond simulation noise {exceeds[arm]}, largest share of alarms above the bound of Theorem 3 "
-                f"{g['over_bound_rate'].max():.4f}")
+    for stream_name in streams:
+        for arm in [a for a in MONITORS if a in arms]:
+            g = claims[(claims["stream"] == stream_name) & (claims["arm"] == arm)]
+            worst = g.loc[g["miscover_rate"].idxmax()]
+            exceeds[f"{stream_name}|{arm}"] = bool((g["miscover_low"] > delta).any())
+            run.log(f"{stream_name}, {ARM_SHORT[arm]}, largest share of draws leaving the bounds "
+                    f"{worst['miscover_rate']:.4f} on {worst['policy']} with {worst['unit']} {worst['case']} at "
+                    f"composition {worst['composition']}, 95% interval {worst['miscover_low']:.4f} to "
+                    f"{worst['miscover_high']:.4f}, delta {delta}, above delta beyond simulation noise "
+                    f"{exceeds[f'{stream_name}|{arm}']}, largest share of alarms above the bound of Theorem 3 "
+                    f"{g['over_bound_rate'].max():.4f}")
     run.save_json({
         "source": {**cfg["source"], "fingerprint": ssum["fingerprint"], "dataset": ssum["dataset"],
                    "processed_version": ssum["processed_version"], "draws": draws, "segments": ssum["segments"],
@@ -674,6 +824,7 @@ def run(cfg: dict, run: runs.Run) -> None:
         "units": [{"name": u["name"], "families": u["families"], "window": positions[u["name"]],
                    "label": labels[positions[u["name"]]]} for u in units],
         "control": CONTROL, "cases": CASES, "policies": policies, "arms": arms, "compositions": compositions,
+        "streams": streams, "main_stream": main_stream({"streams": streams}), "chunk": chunk,
         "trace": trace, "source_checked": check, "miscoverage_exceeds_delta": exceeds,
         "restart_sequences": {"monitor_window": w_count, "monitor_any": w_count},
     }, "summary")
@@ -698,40 +849,61 @@ def _per_unit(table: pd.DataFrame, summary: dict, column: str) -> np.ndarray:
     return table.set_index("unit").reindex([u["name"] for u in summary["units"]])[column].to_numpy(dtype=float)
 
 
+def _trace_streams(t: dict) -> list:
+    # the traces saved per stream, keyed by the stream name, or the one trace of a run from before the streams
+    found = [s for s in STREAMS if any(k.startswith(f"{s}|") for k in t)]
+    if not found:
+        return [(None, t)]
+    return [(s, {k.split("|", 1)[1]: v for k, v in t.items() if k.startswith(f"{s}|")}) for s in found]
+
+
+def _stream_word(stream, streams) -> str:
+    return f"\n{STREAM_LABELS[stream]}" if stream is not None and len(streams) > 1 else ""
+
+
+def _rows(table: pd.DataFrame, stream) -> pd.DataFrame:
+    return of_stream(table, stream) if stream is not None else table
+
+
 def fig_bounds_over_time(run_dir) -> plt.Figure:
     style.use()
-    t = runs.load_arrays(run_dir, "trace")
+    traces = _trace_streams(runs.load_arrays(run_dir, "trace"))
     summary = runs.load_json(run_dir, "summary")
     eps = summary["epsilon"]
     scale = 1e6
     color = style.color_for("forge_simplex")
-    fig, ax = plt.subplots(figsize=(style.WIDTH_SINGLE, 2.6))
+    fig, axes = plt.subplots(1, len(traces), figsize=(style.WIDTH_SINGLE if len(traces) == 1 else style.WIDTH_DOUBLE,
+                                                      2.6), squeeze=False)
     # the count is known at the audited attacks and at the window ends, the bounds move at the audited attacks only,
-    # and the window of the held out family carries a band
-    x = np.concatenate([t["ev_pos"], t["ends"]]) / scale
-    y = np.concatenate([t["ev_count"], t["cum_attacks"]])
-    order = np.argsort(x, kind="stable")
-    ax.plot(x[order], y[order], color=style.INK, linewidth=1, label="attacks among the dismissed flows")
-    pos = t["ev_pos"] / scale
-    n_end = t["n_end"] / scale
-    ax.step(np.r_[pos, n_end], np.r_[t["lcb"], t["lcb"][-1]], where="post", color=color, linewidth=1.2,
-            label="lower bound")
-    ax.step(np.r_[pos, n_end], np.r_[t["ucb"], t["ucb"][-1]], where="post", color=color, linestyle="--",
-            linewidth=1.2, label="upper bound")
-    ax.plot([0, n_end], [0, eps * t["n_end"]], color=style.GRAY, linestyle=":", linewidth=1,
-            label=r"$\varepsilon$ times the dismissed flows")
-    ends = t["ends"] / scale
-    for e in ends[:-1]:
-        ax.axvline(e, color=style.GRAY, linestyle=":", linewidth=0.6)
-    w = int(t["unseen"])
-    band = ax.axvspan(0 if w == 0 else ends[w - 1], ends[w], color=style.GRAY, alpha=0.15, linewidth=0)
-    if t["alarm_pos"] >= 0:
-        ax.axvline(t["alarm_pos"] / scale, color=color, linestyle="-.", linewidth=0.8)
-    ax.set_xlim(0, n_end)
-    ax.set_ylim(0, 1.1 * max(float(t["ucb"].max()), float(y.max()), 1.0))
-    ax.set_xlabel("millions of dismissed flows")
-    ax.set_ylabel("attacks")
-    layout.legend_below(fig, ax, ["attacks among the dismissed flows", "lower bound", "upper bound"],
+    # and the window of the held out family carries a band, one panel per stream
+    band = None
+    for ax, (stream, t), letter in zip(axes[0], traces, string.ascii_lowercase):
+        x = np.concatenate([t["ev_pos"], t["ends"]]) / scale
+        y = np.concatenate([t["ev_count"], t["cum_attacks"]])
+        order = np.argsort(x, kind="stable")
+        ax.plot(x[order], y[order], color=style.INK, linewidth=1, label="attacks among the dismissed flows")
+        pos = t["ev_pos"] / scale
+        n_end = t["n_end"] / scale
+        ax.step(np.r_[pos, n_end], np.r_[t["lcb"], t["lcb"][-1]], where="post", color=color, linewidth=1.2,
+                label="lower bound")
+        ax.step(np.r_[pos, n_end], np.r_[t["ucb"], t["ucb"][-1]], where="post", color=color, linestyle="--",
+                linewidth=1.2, label="upper bound")
+        ax.plot([0, n_end], [0, eps * t["n_end"]], color=style.GRAY, linestyle=":", linewidth=1,
+                label=r"$\varepsilon$ times the dismissed flows")
+        ends = t["ends"] / scale
+        for e in ends[:-1]:
+            ax.axvline(e, color=style.GRAY, linestyle=":", linewidth=0.6)
+        w = int(t["unseen"])
+        band = ax.axvspan(0 if w == 0 else ends[w - 1], ends[w], color=style.GRAY, alpha=0.15, linewidth=0)
+        if t["alarm_pos"] >= 0:
+            ax.axvline(t["alarm_pos"] / scale, color=color, linestyle="-.", linewidth=0.8)
+        ax.set_xlim(0, n_end)
+        ax.set_ylim(0, 1.1 * max(float(t["ucb"].max()), float(y.max()), 1.0))
+        ax.set_xlabel("millions of dismissed flows" + _stream_word(stream, traces).replace("\n", ", "))
+        if len(traces) > 1:
+            layout.panel_letter(ax, letter)
+    axes[0, 0].set_ylabel("attacks")
+    layout.legend_below(fig, axes[0, 0], ["attacks among the dismissed flows", "lower bound", "upper bound"],
                         [(band, "window of the held out family")], ncol=2)
     return fig
 
@@ -742,31 +914,35 @@ def fig_for_by_family(run_dir) -> plt.Figure:
     summary = runs.load_json(run_dir, "summary")
     policies = [p for p in POLICIES if p in summary["policies"]]
     compositions = summary["compositions"]
-    fig, axes = plt.subplots(1, len(compositions), figsize=(style.WIDTH_DOUBLE, 2.8), sharex=True, sharey=True,
-                             squeeze=False)
-    axes = axes[0]
+    streams = summary.get("streams", [None])
+    fig, axes = plt.subplots(len(streams), len(compositions), figsize=(style.WIDTH_DOUBLE, 2.8 * len(streams)),
+                             sharex=True, sharey=True, squeeze=False)
     x = np.arange(len(summary["units"]))
     floor = summary["epsilon"] / 100
     # the population FOR of the family's window at the policy's threshold with the family unseen, filled, and known,
-    # hollow, a dismissed share of zero has no rate
-    data = blocks[blocks["unseen"]]
-    for ax, co, letter in zip(axes, compositions, "abcdef"):
-        g = data[data["composition"] == co["name"]]
-        for k, p in enumerate(policies):
-            line = _policy_line(p)
-            xs = layout.dodge(x, k, len(policies), 0.1)
-            for case, face in (("unseen", line["color"]), ("known", "white")):
-                h = g[(g["policy"] == p) & (g["case"] == case)]
-                ax.plot(xs, np.maximum(_per_unit(h, summary, "for_true_mean"), floor), linestyle="none",
-                        markersize=4, markerfacecolor=face, **line)
-        ax.axhline(summary["epsilon"], color=style.GRAY, linestyle="--", linewidth=1, label=r"$\varepsilon$")
-        ax.set_yscale("log")
+    # hollow, one row per stream, a dismissed share of zero has no rate
+    letters = iter(string.ascii_lowercase)
+    for row, stream in zip(axes, streams):
+        data = _rows(blocks, stream)
+        data = data[data["unseen"]]
+        for ax, co in zip(row, compositions):
+            g = data[data["composition"] == co["name"]]
+            for k, p in enumerate(policies):
+                line = _policy_line(p)
+                xs = layout.dodge(x, k, len(policies), 0.1)
+                for case, face in (("unseen", line["color"]), ("known", "white")):
+                    h = g[(g["policy"] == p) & (g["case"] == case)]
+                    ax.plot(xs, np.maximum(_per_unit(h, summary, "for_true_mean"), floor), linestyle="none",
+                            markersize=4, markerfacecolor=face, **line)
+            ax.axhline(summary["epsilon"], color=style.GRAY, linestyle="--", linewidth=1, label=r"$\varepsilon$")
+            ax.set_yscale("log")
+            _unit_axis(ax, summary)
+            layout.panel_letter(ax, next(letters))
+        row[0].set_ylabel("FOR of the window at the threshold" + _stream_word(stream, streams))
+    for ax, co in zip(axes[-1], compositions):
         ax.set_xlabel(f"held out family, its window at prevalence {style.percent(co['unseen'])}")
-        _unit_axis(ax, summary)
-        layout.panel_letter(ax, letter)
-    axes[0].set_ylabel("FOR of the window at the threshold")
     hollow = Line2D([], [], color=style.GRAY, marker="o", markerfacecolor="white", linestyle="none")
-    layout.legend_below(fig, axes[0], [POLICY_LABELS[p] for p in policies], [(hollow, "family known")])
+    layout.legend_below(fig, axes[0, 0], [POLICY_LABELS[p] for p in policies], [(hollow, "family known")])
     return fig
 
 
@@ -776,35 +952,42 @@ def fig_alarm_by_family(run_dir) -> plt.Figure:
     summary = runs.load_json(run_dir, "summary")
     policies = [p for p in POLICIES if p in summary["policies"]]
     compositions = summary["compositions"]
-    fig, axes = plt.subplots(2, len(compositions), figsize=(style.WIDTH_DOUBLE, 4.4), sharex=True, squeeze=False)
+    streams = summary.get("streams", [None])
+    fig, axes = plt.subplots(2 * len(streams), len(compositions), figsize=(style.WIDTH_DOUBLE, 4.4 * len(streams)),
+                             sharex=True, squeeze=False)
     x = np.arange(len(summary["units"]))
-    data = claims[(claims["arm"] == "monitor") & (claims["case"] == "unseen")]
-    # top, the share of draws with the alarm inside the window of the held out family, filled, and before it, hollow.
-    # bottom, the dismissed sessions of that window until the alarm with their 5% to 95% range, and the dismissed
-    # sessions of the whole window
-    for col, co in enumerate(compositions):
-        g = data[data["composition"] == co["name"]]
-        for k, p in enumerate(policies):
-            h = g[g["policy"] == p]
-            xs = layout.dodge(x, k, len(policies), 0.1)
-            line = _policy_line(p)
-            axes[0, col].plot(xs, _per_unit(h, summary, "alarm_in_unseen_rate"), linestyle="none", markersize=4,
+    # per stream two rows. top, the share of draws with the alarm inside the window of the held out family, filled,
+    # and before it, hollow. bottom, the dismissed sessions of that window until the alarm with their 5% to 95%
+    # range, and the dismissed sessions of the whole window
+    letters = iter(string.ascii_lowercase)
+    for si, stream in enumerate(streams):
+        data = _rows(claims, stream)
+        data = data[(data["arm"] == "monitor") & (data["case"] == "unseen")]
+        top, bottom = axes[2 * si], axes[2 * si + 1]
+        for col, co in enumerate(compositions):
+            g = data[data["composition"] == co["name"]]
+            for k, p in enumerate(policies):
+                h = g[g["policy"] == p]
+                xs = layout.dodge(x, k, len(policies), 0.1)
+                line = _policy_line(p)
+                top[col].plot(xs, _per_unit(h, summary, "alarm_in_unseen_rate"), linestyle="none", markersize=4,
                               **line)
-            axes[0, col].plot(xs, _per_unit(h, summary, "alarm_before_unseen_rate"), linestyle="none",
-                              markersize=4, markerfacecolor="white", color=line["color"], marker=line["marker"])
-            layout.points(axes[1, col], xs, np.maximum(_per_unit(h, summary, "detect_sessions_median"), 1),
-                          np.maximum(_per_unit(h, summary, "detect_sessions_low"), 1),
-                          np.maximum(_per_unit(h, summary, "detect_sessions_high"), 1), linestyle="none", **line)
-            axes[1, col].plot(xs, np.maximum(_per_unit(h, summary, "unseen_dismissed_median"), 1),
-                              linestyle="none", marker="_", markersize=7, color=style.INK)
-        axes[0, col].set_ylim(-0.02, 1.02)
-        axes[1, col].set_yscale("log")
-        axes[1, col].set_xlabel(f"held out family, its window at prevalence {style.percent(co['unseen'])}")
-        _unit_axis(axes[1, col], summary)
-    axes[0, 0].set_ylabel("share of draws with an alarm\ninside the window")
-    axes[1, 0].set_ylabel("dismissed sessions of the window\nuntil the alarm")
-    for ax, letter in zip(axes.flat, "abcdef"):
-        layout.panel_letter(ax, letter)
+                top[col].plot(xs, _per_unit(h, summary, "alarm_before_unseen_rate"), linestyle="none", markersize=4,
+                              markerfacecolor="white", color=line["color"], marker=line["marker"])
+                layout.points(bottom[col], xs, np.maximum(_per_unit(h, summary, "detect_sessions_median"), 1),
+                              np.maximum(_per_unit(h, summary, "detect_sessions_low"), 1),
+                              np.maximum(_per_unit(h, summary, "detect_sessions_high"), 1), linestyle="none", **line)
+                bottom[col].plot(xs, np.maximum(_per_unit(h, summary, "unseen_dismissed_median"), 1),
+                                 linestyle="none", marker="_", markersize=7, color=style.INK)
+            top[col].set_ylim(-0.02, 1.02)
+            bottom[col].set_yscale("log")
+            _unit_axis(bottom[col], summary)
+        top[0].set_ylabel("share of draws with an alarm\ninside the window" + _stream_word(stream, streams))
+        bottom[0].set_ylabel("dismissed sessions of the window\nuntil the alarm" + _stream_word(stream, streams))
+        for ax in [*top, *bottom]:
+            layout.panel_letter(ax, next(letters))
+    for ax, co in zip(axes[-1], compositions):
+        ax.set_xlabel(f"held out family, its window at prevalence {style.percent(co['unseen'])}")
     hollow = Line2D([], [], color=style.GRAY, marker="o", markerfacecolor="white", linestyle="none")
     tick = Line2D([], [], color=style.INK, marker="_", markersize=7, linestyle="none")
     layout.legend_below(fig, axes[0, 0], [POLICY_LABELS[p] for p in policies],
@@ -818,34 +1001,39 @@ def fig_leakage_by_family(run_dir) -> plt.Figure:
     summary = runs.load_json(run_dir, "summary")
     policies = [p for p in POLICIES if p in summary["policies"]]
     compositions = summary["compositions"]
-    fig, axes = plt.subplots(1, len(compositions), figsize=(style.WIDTH_DOUBLE, 2.8), sharey=True, squeeze=False)
-    axes = axes[0]
+    streams = summary.get("streams", [None])
+    fig, axes = plt.subplots(len(streams), len(compositions), figsize=(style.WIDTH_DOUBLE, 2.8 * len(streams)),
+                             sharex=True, sharey=True, squeeze=False)
     x = np.arange(len(summary["units"]))
-    data = claims[claims["arm"] == "monitor"]
     # the attacks of the held out family dismissed until the switch off with the family unseen, filled, and known,
-    # hollow, and all of them, the leakage without monitoring, as a tick
-    for ax, co, letter in zip(axes, compositions, "abcdef"):
-        g = data[data["composition"] == co["name"]]
-        for k, p in enumerate(policies):
-            line = _policy_line(p)
-            xs = layout.dodge(x, k, len(policies), 0.1)
-            for case, face in (("unseen", line["color"]), ("known", "white")):
-                h = g[(g["policy"] == p) & (g["case"] == case)]
-                layout.points(ax, xs, np.maximum(_per_unit(h, summary, "unseen_leak_median"), 1),
-                              np.maximum(_per_unit(h, summary, "unseen_leak_low"), 1),
-                              np.maximum(_per_unit(h, summary, "unseen_leak_high"), 1), linestyle="none",
-                              markerfacecolor=face, **line)
-            h = g[(g["policy"] == p) & (g["case"] == "unseen")]
-            ax.plot(xs, np.maximum(_per_unit(h, summary, "unseen_attacks_median"), 1), linestyle="none", marker="_",
-                    markersize=7, color=line["color"])
-        ax.set_yscale("log")
+    # hollow, and all of them, the leakage without monitoring, as a tick, one row per stream
+    letters = iter(string.ascii_lowercase)
+    for row, stream in zip(axes, streams):
+        data = _rows(claims, stream)
+        data = data[data["arm"] == "monitor"]
+        for ax, co in zip(row, compositions):
+            g = data[data["composition"] == co["name"]]
+            for k, p in enumerate(policies):
+                line = _policy_line(p)
+                xs = layout.dodge(x, k, len(policies), 0.1)
+                for case, face in (("unseen", line["color"]), ("known", "white")):
+                    h = g[(g["policy"] == p) & (g["case"] == case)]
+                    layout.points(ax, xs, np.maximum(_per_unit(h, summary, "unseen_leak_median"), 1),
+                                  np.maximum(_per_unit(h, summary, "unseen_leak_low"), 1),
+                                  np.maximum(_per_unit(h, summary, "unseen_leak_high"), 1), linestyle="none",
+                                  markerfacecolor=face, **line)
+                h = g[(g["policy"] == p) & (g["case"] == "unseen")]
+                ax.plot(xs, np.maximum(_per_unit(h, summary, "unseen_attacks_median"), 1), linestyle="none",
+                        marker="_", markersize=7, color=line["color"])
+            ax.set_yscale("log")
+            _unit_axis(ax, summary)
+            layout.panel_letter(ax, next(letters))
+        row[0].set_ylabel("attacks of the family dismissed\nuntil the switch off" + _stream_word(stream, streams))
+    for ax, co in zip(axes[-1], compositions):
         ax.set_xlabel(f"held out family, its window at prevalence {style.percent(co['unseen'])}")
-        _unit_axis(ax, summary)
-        layout.panel_letter(ax, letter)
-    axes[0].set_ylabel("attacks of the family dismissed\nuntil the switch off")
     hollow = Line2D([], [], color=style.GRAY, marker="o", markerfacecolor="white", linestyle="none")
     tick = Line2D([], [], color=style.GRAY, marker="_", markersize=7, linestyle="none")
-    layout.legend_below(fig, axes[0], [POLICY_LABELS[p] for p in policies],
+    layout.legend_below(fig, axes[0, 0], [POLICY_LABELS[p] for p in policies],
                         [(hollow, "family known"), (tick, "without monitoring")])
     return fig
 
@@ -856,27 +1044,34 @@ def fig_leakage_by_arm(run_dir) -> plt.Figure:
     summary = runs.load_json(run_dir, "summary")
     arms = [a for a in ARMS if a in summary["arms"]]
     compositions = summary["compositions"]
+    streams = summary.get("streams", [None])
     policy = summary["trace"]["policy"]
-    fig, axes = plt.subplots(1, len(compositions), figsize=(style.WIDTH_DOUBLE, 2.8), sharey=True, squeeze=False)
-    axes = axes[0]
+    fig, axes = plt.subplots(len(streams), len(compositions), figsize=(style.WIDTH_DOUBLE, 2.8 * len(streams)),
+                             sharex=True, sharey=True, squeeze=False)
     x = np.arange(len(summary["units"]))
-    data = claims[(claims["case"] == "unseen") & (claims["policy"] == policy)]
-    # the attacks of the held out family dismissed until the switch off under every arm, for one threshold policy
-    for ax, co, letter in zip(axes, compositions, "abcdef"):
-        g = data[data["composition"] == co["name"]]
-        for k, arm in enumerate(arms):
-            h = g[g["arm"] == arm]
-            xs = layout.dodge(x, k, len(arms), 0.12)
-            layout.points(ax, xs, np.maximum(_per_unit(h, summary, "unseen_leak_median"), 1),
-                          np.maximum(_per_unit(h, summary, "unseen_leak_low"), 1),
-                          np.maximum(_per_unit(h, summary, "unseen_leak_high"), 1), linestyle="none",
-                          **_arm_line(arm))
-        ax.set_yscale("log")
+    # the attacks of the held out family dismissed until the switch off under every arm, for one threshold policy,
+    # one row per stream
+    letters = iter(string.ascii_lowercase)
+    for row, stream in zip(axes, streams):
+        data = _rows(claims, stream)
+        data = data[(data["case"] == "unseen") & (data["policy"] == policy)]
+        for ax, co in zip(row, compositions):
+            g = data[data["composition"] == co["name"]]
+            for k, arm in enumerate(arms):
+                h = g[g["arm"] == arm]
+                xs = layout.dodge(x, k, len(arms), 0.12)
+                layout.points(ax, xs, np.maximum(_per_unit(h, summary, "unseen_leak_median"), 1),
+                              np.maximum(_per_unit(h, summary, "unseen_leak_low"), 1),
+                              np.maximum(_per_unit(h, summary, "unseen_leak_high"), 1), linestyle="none",
+                              **_arm_line(arm))
+            ax.set_yscale("log")
+            _unit_axis(ax, summary)
+            layout.panel_letter(ax, next(letters))
+        row[0].set_ylabel(f"attacks of the family dismissed until\nthe switch off, "
+                          f"{POLICY_LABELS[policy].split(',')[0]}" + _stream_word(stream, streams))
+    for ax, co in zip(axes[-1], compositions):
         ax.set_xlabel(f"held out family, its window at prevalence {style.percent(co['unseen'])}")
-        _unit_axis(ax, summary)
-        layout.panel_letter(ax, letter)
-    axes[0].set_ylabel(f"attacks of the family dismissed until\nthe switch off, {POLICY_LABELS[policy].split(',')[0]}")
-    layout.legend_below(fig, axes[0], [ARM_LABELS[a] for a in arms])
+    layout.legend_below(fig, axes[0, 0], [ARM_LABELS[a] for a in arms])
     return fig
 
 

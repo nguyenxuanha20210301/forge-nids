@@ -35,6 +35,12 @@ what each method claims.
     forge_online    Theorem 1b, the same for one window from its unlabeled scores, valid while the attack families keep
                     their calibration score distributions
     ltt_iid         the FOR at the prevalence and the family mix of the calibration set
+    ltt_plugin      nothing, the pooled certificate at the prevalence of the window estimated from its unlabeled
+                    scores at the threshold where the benign and the attack shares of the selection parts differ
+                    most, adjusted classify and count, see e11
+    ltt_upper       the FOR at every prevalence up to an upper confidence bound on the window's prevalence from the
+                    same estimate, valid under label shift with the calibration mix, which a window of one family
+                    breaks by construction
     conformal_fnr   a miss rate of at most beta on average over the calibration draw, with beta the miss rate of the
                     fixed threshold in the selection parts
     fixed_sel       nothing, the loosest threshold whose FOR at the calibration prevalence and mix, estimated on the
@@ -58,24 +64,29 @@ from forge.data import litnet2020
 from forge.data.synthetic import draw_counts
 from forge.eval import windows as judge
 from forge.eval.metrics import auc
+from forge.experiments.for_vs_prevalence import (ESTIMATED, PER_WINDOW, estimate_settings, estimate_summary,
+                                                 estimated_methods, log_estimates)
 from forge.models import boosting
 from forge.models.encoding import Encoder
 from forge.viz import layout, prevalence, style
 from forge.viz.export import save_figure
 from forge.viz.prevalence import BEST_LINES
 
-METHODS = ["forge_simplex", "forge_pooled", "forge_online", "ltt_iid", "conformal_fnr", "fixed_sel"]
+METHODS = ["forge_simplex", "forge_pooled", "forge_online", "ltt_iid", "ltt_plugin", "ltt_upper", "conformal_fnr",
+           "fixed_sel"]
 LABELS = {
     "forge_simplex": "FORGE offline, Theorem 1",
     "forge_pooled": "FORGE offline, calibration mix",
     "forge_online": "FORGE online, Theorem 1b",
     "ltt_iid": "LTT, i.i.d.",
+    "ltt_plugin": "LTT at the estimated prevalence, plug in",
+    "ltt_upper": "LTT at the estimated prevalence, upper bound",
     "conformal_fnr": "conformal FNR, Şahin and Mert",
     "fixed_sel": "fixed threshold, selection parts",
 }
 # the markers of e10 and e11 for the same methods
-MARKERS = {"forge_simplex": "o", "forge_pooled": "s", "forge_online": "v", "ltt_iid": "^", "conformal_fnr": "p",
-           "fixed_sel": "X"}
+MARKERS = {"forge_simplex": "o", "forge_pooled": "s", "forge_online": "v", "ltt_iid": "^", "ltt_plugin": "<",
+           "ltt_upper": ">", "conformal_fnr": "p", "fixed_sel": "X"}
 PARTS = ["train", "selection", "calibration", "test"]
 # the mix of attack families in a window, the families of its capture or the mix of the calibration set
 MIXES = ["window", "calibration"]
@@ -331,6 +342,8 @@ def run(cfg: dict, run: runs.Run) -> None:
                 f"calibration parts {np.where(hit, b_cal[np.maximum(out['index'], 0)], 0.0).mean():.4f}")
     # the bounds of the calibration sets serve every window
     certify_window = online_certifier(grouped_below, grouped_n, *args, **start)
+    estimate = estimate_settings(c, delta, eps, [m for m in ESTIMATED if m in methods], b_sel, m_sel,
+                                 cal.benign_below, cal.n_benign, pooled_below, pooled_n, start, run.log)
 
     # rates at the offline FORGE thresholds, averaged over the calibration draws that certify one
     forge_index = offline["forge_simplex"]["index"]
@@ -351,12 +364,16 @@ def run(cfg: dict, run: runs.Run) -> None:
     benign_test = np.array([w["sizes"][0] for w in windows])
     # a window of a filtered capture takes the mean benign count of the other windows
     reference_benign = int(round(benign_test[~filtered_window].mean()))
-    rows, natural_rows, values, natural_values, skipped = [], [], {}, {}, []
+    rows, natural_rows, values, natural_values, skipped, estimate_rows = [], [], {}, {}, [], []
     shape = (len(segments), len(prevalences), len(mixes), draws)
     online_index = {arm: np.full(shape, -1, dtype=np.int16) for arm in ARMS}
     online_floor = {arm: np.zeros(shape, dtype=np.float32) for arm in ARMS}
+    estimated_index = {arm: {m: np.full(shape, -1, dtype=np.int16) for m in estimate["methods"]} for arm in ARMS}
+    estimated_pi = {arm: {m: np.zeros(shape, dtype=np.float32) for m in estimate["methods"]} for arm in ARMS}
     natural_index = np.full((len(segments), draws), -1, dtype=np.int16)
     natural_floor = np.zeros((len(segments), draws), dtype=np.float32)
+    natural_estimated = {m: np.full((len(segments), draws), -1, dtype=np.int16) for m in estimate["methods"]}
+    natural_pi = {m: np.zeros((len(segments), draws), dtype=np.float32) for m in estimate["methods"]}
     offset = {arm: 1 + a * cells for a, arm in enumerate(ARMS)}
     window_rows = []
     for i, (win, g) in enumerate(zip(windows, segments.itertuples())):
@@ -396,11 +413,20 @@ def run(cfg: dict, run: runs.Run) -> None:
                     window_below = drawn.benign_below + attack_below
                     online = certify_window(window_below, np.full(draws, n_w))
                     online_index[arm][i, j, k], online_floor[arm][i, j, k] = online["index"], online["floor"]
+                    per_window, estimated = estimated_methods(estimate, window_below, np.full(draws, n_w), pi)
+                    for name, out in estimated.items():
+                        estimated_index[arm][name][i, j, k] = out["index"]
+                        estimated_pi[arm][name][i, j, k] = out["prevalence"]
+                    if estimated:
+                        estimate_rows.append({"arm": arm, **cell_base, "prevalence": pi, "mix": mix,
+                                              "natural": False, "window_sessions": n_w, "draws": draws,
+                                              **estimate_summary(estimated, pi)})
                     m = shares @ m_family
                     j_every = every.get(arm, -1)
                     every_share = (np.nan if arm not in every else
                                    float(pi * m[j_every] + (1 - pi) * b[j_every]) if j_every >= 0 else 0.0)
-                    rows += judge.evaluate(methods, offline, online, pi, m, b, attack_below, window_below, eps, values,
+                    rows += judge.evaluate(methods, offline, {"forge_online": online, **per_window}, pi, m, b,
+                                           attack_below, window_below, eps, values,
                                            {"arm": arm, **cell_base, "prevalence": pi, "mix": mix,
                                             "window_sessions": n_w, "benign_subsampled": subsampled,
                                             "in_claim": claim,
@@ -419,9 +445,16 @@ def run(cfg: dict, run: runs.Run) -> None:
             window_below = drawn.benign_below + attack_below
             online = certify_window(window_below, np.full(draws, n_w))
             natural_index[i], natural_floor[i] = online["index"], online["floor"]
+            per_window, estimated = estimated_methods(estimate, window_below, np.full(draws, n_w), natural)
+            for name, out in estimated.items():
+                natural_estimated[name][i], natural_pi[name][i] = out["index"], out["prevalence"]
+            if estimated:
+                estimate_rows.append({"arm": "real", **cell_base, "prevalence": natural, "mix": "window",
+                                      "natural": True, "window_sessions": n_w, "draws": draws,
+                                      **estimate_summary(estimated, natural)})
             m = own @ m_w_family
-            natural_rows += judge.evaluate(methods, offline, online, natural, m, b_w, attack_below, window_below, eps,
-                                           natural_values,
+            natural_rows += judge.evaluate(methods, offline, {"forge_online": online, **per_window}, natural, m, b_w,
+                                           attack_below, window_below, eps, natural_values,
                                            {"arm": "real", **cell_base, "prevalence": natural, "mix": "window",
                                             "window_sessions": n_w, "in_claim": own_claim,
                                             "up_to_pi_max": natural <= pi_max,
@@ -443,6 +476,10 @@ def run(cfg: dict, run: runs.Run) -> None:
     run.save_table(claims, "claims")
     natural_table = pd.DataFrame(natural_rows)
     run.save_table(natural_table, "natural")
+    if estimate_rows:
+        estimates = pd.DataFrame(estimate_rows)
+        run.save_table(estimates, "estimates")
+        log_estimates(estimates[~estimates["natural"]], estimate, dep["main_prevalence"], run.log)
     window_table = pd.DataFrame(window_rows)
     run.save_table(window_table, "windows")
     for w in window_table.itertuples():
@@ -548,6 +585,12 @@ def run(cfg: dict, run: runs.Run) -> None:
                     online_index=np.stack([online_index[arm] for arm in ARMS]),
                     online_floor=np.stack([online_floor[arm] for arm in ARMS]),
                     natural_online_index=natural_index, natural_online_floor=natural_floor,
+                    **{f"{PER_WINDOW[m]}_index": np.stack([estimated_index[arm][m] for arm in ARMS])
+                       for m in estimate["methods"]},
+                    **{f"{PER_WINDOW[m]}_prevalence": np.stack([estimated_pi[arm][m] for arm in ARMS])
+                       for m in estimate["methods"]},
+                    **{f"natural_{PER_WINDOW[m]}_index": natural_estimated[m] for m in estimate["methods"]},
+                    **{f"natural_{PER_WINDOW[m]}_prevalence": natural_pi[m] for m in estimate["methods"]},
                     counts=np.column_stack([cal.n_benign, cal.n_family]))
     run.save_json({"encoder": enc.to_dict(), "features": features, "params": sc["params"], "rounds": sc["rounds"],
                    "early_stopping": sc["early_stopping"], "best_iteration": booster.best_iteration,
@@ -569,6 +612,7 @@ def run(cfg: dict, run: runs.Run) -> None:
         "offline_refused": {m: float(np.mean(out["index"] < 0)) for m, out in offline.items()},
         "selection_auc": sel_auc, "calibration_auc": cal_auc, "forge_calibration": forge_cal,
         "min_family_attacks": min_attacks, "largest_violation_up_to_pi_max": largest,
+        "estimate": estimate["summary"],
     }, "summary")
 
     for name, draw in FIGURES.items():

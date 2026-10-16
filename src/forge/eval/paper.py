@@ -33,6 +33,22 @@ E6_COLUMNS = ["alarm_in_unseen_rate", "alarm_before_unseen_rate", "alarm_rate", 
 E7_COLUMNS = ["dismissed", "violation_rate", "refused", "escalations_per_million", "audits_per_million",
               "workload_per_million", "leaked_per_million", "leak_median", "realized_for_median", "alarm_rate",
               "excess_median"]
+# the stream the paper reads where a table holds both kinds, the replay on the real order
+PAPER_STREAM = "replay"
+
+
+def paper_rows(table: pd.DataFrame) -> pd.DataFrame:
+    """the rows of the stream the paper reads, per dataset where the table has one. a dataset whose rows carry the
+    replay keeps those rows only, one without it keeps its rows as they are, and a table without streams is returned
+    whole."""
+    if "stream" not in table:
+        return table
+    groups = table.groupby("dataset", sort=False) if "dataset" in table else [(None, table)]
+    parts = []
+    for _, g in groups:
+        has = g["stream"] == PAPER_STREAM
+        parts.append(g[has] if has.any() else g)
+    return pd.concat(parts) if parts else table
 
 
 def read_pooled(folder) -> dict:
@@ -137,9 +153,9 @@ def e6_tables(pooled: dict) -> dict:
     benign share and the miss rate of its window with the family unseen against known."""
     out = {}
     if "e23" in pooled and "e6_by_family" in pooled["e23"]:
-        out["e6_by_family"] = _keep(pooled["e23"]["e6_by_family"], ["unit", "case", "composition", "policy", "arm",
-                                                                  "unseen_segment", "unseen_sessions", "seeds"],
-                                    E6_COLUMNS)
+        out["e6_by_family"] = _keep(pooled["e23"]["e6_by_family"], ["stream", "unit", "case", "composition", "policy",
+                                                                  "arm", "unseen_segment", "unseen_sessions",
+                                                                  "seeds"], E6_COLUMNS)
     if "e23" in pooled and "e6_windows" in pooled["e23"]:
         out["e6_windows"] = pooled["e23"]["e6_windows"].copy()
     return out
@@ -193,9 +209,9 @@ def e7_monitoring(folders: dict) -> pd.DataFrame:
     """E7 at the monitoring stage over seeds, the workload, the audits and the attacks let through of every policy
     under each arm on the real streams, folders mapping a seed to an e21 or e23 run folder."""
     frames = {seed: workload.monitoring(folder) for seed, folder in folders.items()}
-    pooled = seeds.pool(frames, ["dataset", "stage", "composition", "policy", "arm"])
-    return uniform(_keep(pooled, ["dataset", "stage", "composition", "policy", "arm", "sessions", "seeds"],
-                         E7_COLUMNS), E7_COLUMNS)
+    keys = ["dataset", "stage", "stream", "composition", "policy", "arm"]
+    pooled = seeds.pool(frames, keys)
+    return uniform(_keep(pooled, keys + ["sessions", "seeds"], E7_COLUMNS), E7_COLUMNS)
 
 
 def uniform(table: pd.DataFrame, columns) -> pd.DataFrame:

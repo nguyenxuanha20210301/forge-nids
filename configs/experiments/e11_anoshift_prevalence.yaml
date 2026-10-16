@@ -54,6 +54,17 @@ certify:
   # an attack type is its own family only when its expected calibration attacks could certify, with no miss, a
   # threshold dismissing this share of the benign sessions, 1,364 attacks at the values above. the others are merged
   family_floor: 0.3
+  # LTT at a prevalence estimated on the window, plug in and upper bound. the threshold t_star is fixed on the
+  # selection year at the point where the benign and the attack shares at the calibration mix differ most, the
+  # estimate reads the shares at or below it, and the upper bound takes a two sided DKW event on the benign cdf of
+  # the calibration draw at delta_benign, which also serves the certificate's benign bound, the window's one sided
+  # DKW bound at delta_window and a Clopper-Pearson bound on the miss rate at t_star at delta_miss, the family bound
+  # of the certificate keeping the rest of delta
+  estimate:
+    threshold: ks
+    delta_benign: 0.01
+    delta_window: 0.01
+    delta_miss: 0.005
 
 calibration:
   # the calibration years keep all their benign sessions and have their attacks thinned to this prevalence
@@ -75,5 +86,5 @@ deployment:
   main_period: iid
 
 simulation:
-  methods: [forge_simplex, forge_online, ltt_iid, conformal_fnr, fixed_sel]
+  methods: [forge_simplex, forge_online, ltt_iid, ltt_plugin, ltt_upper, conformal_fnr, fixed_sel]
   draws: 1000

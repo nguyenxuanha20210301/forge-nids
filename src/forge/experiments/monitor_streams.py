@@ -1,21 +1,33 @@
 """e21, RQ2 on AnoShift, FORGE-Monitor on the dismissed streams of the thresholds of e11 through the 72 blocks of 2010
-to 2015 in order, against the baselines that read the same audits.
+to 2015 in order, against the baselines that read the same audits, on a simulated stream and on the replayed one.
 
 the streams come from an e11 run. its grid, block histograms, calibration draws and thresholds are read from the run
 folder, the calibration sets are drawn again from the same stream of seeds, which the run checks against the saved
 offline thresholds, and the window of each block is drawn again from the block's score distributions with the seed
 e11 used, which the run checks against the saved online thresholds. a stream is the dismissed sessions of one
 threshold policy through the windows in order, each window thinned to a composition, the block's own mix of attack
-types at a prevalence. a window keeps all benign sessions of its block, and the threshold of a draw decides how many
-of its sessions are dismissed. every dismissed session is an attack with the FOR of the block's population at the
-threshold, independently of the rest, and is audited with probability q, so the audited attacks of a window come at
-geometric gaps and the attacks between two of them, which the monitor never sees, are binomial in the gap. the count
-of attacks among the dismissed sessions of the drawn stream is the ground truth the bounds are judged on, and the FOR
-of the block's population at the threshold is the ground truth of the drift.
+types at a prevalence, and it comes in two kinds.
+
+    simulated   a window keeps all benign sessions of its block, the threshold of a draw decides how many of its
+                sessions are dismissed, every dismissed session is an attack with the FOR of the block's population at
+                the threshold, independently of the rest, and is audited with probability q, so the audited attacks of
+                a window come at geometric gaps and the attacks between two of them, which the monitor never sees,
+                are binomial in the gap
+    replay      the sessions of the block in their real order from the per session scores the source run saved,
+                every benign session kept and every attack row kept with the probability that gives the composition's
+                prevalence, dismissed at the threshold of the draw with their real labels and audited with probability
+                q, so the real order and the bursts of the block reach the monitor and the thinning and the coins are
+                the simulations left, see forge.monitor.replay
+
+the count of attacks among the dismissed sessions of the drawn stream is the ground truth the bounds are judged on,
+and the FOR of the block's population at the threshold is the ground truth of the drift. the simulated stream draws
+its seeds first and the replay spawns its seeds after them, so the simulated numbers of a run with both streams are
+those of a run with the simulated stream alone.
 
 threshold policies, the streams.
     forge_simplex    the offline certificate of Theorem 1 from the calibration draw, one threshold per draw
-    forge_online     Theorem 1b, a threshold per window from the window's own unlabeled scores
+    forge_online     Theorem 1b, a threshold per window from the window's own unlabeled scores, on the replay from
+                     the replayed window's own counts
     ltt_iid          the i.i.d. baseline, one threshold per draw
     conformal_fnr    the conformal threshold of Şahin and Mert, one per draw
     fixed_sel        the threshold of common practice, tuned on the selection year
@@ -34,20 +46,24 @@ monitors, the arms on every stream, all reading the same audits.
                      each block from its audited sessions at delta over the number of blocks, read at the block's end
     naive            the running Horvitz Thompson estimate against epsilon times the dismissed count, no bound
 
-counted per policy, composition and arm. the share of draws with an alarm and with a false alarm, one whose count at
-the alarm is at or below epsilon times the dismissed count, both since the start of the sequence, the block and the
-session of the alarm, the first block
-whose population FOR at the policy's threshold exceeds epsilon and the first block end at which the realized count
-does, the attacks dismissed until the switch off against the whole stream's, the excess over epsilon times the
-sessions dismissed, the bound of Theorem 3 at the alarm, the share of draws in which the count leaves the bounds, the
-state at every block end, and the audits. per block the population FOR, the share of the window dismissed and the
-realized FOR of each policy.
+counted per stream, policy, composition and arm. the share of draws with an alarm and with a false alarm, one whose
+count at the alarm is at or below epsilon times the dismissed count, both since the start of the sequence, the block
+and the session of the alarm, the first block whose population FOR at the policy's threshold exceeds epsilon and the
+first block end at which the realized count does, the attacks dismissed until the switch off against the whole
+stream's, the excess over epsilon times the sessions dismissed, the bound of Theorem 3 at the alarm, the share of
+draws in which the count leaves the bounds, the state at every block end, and the audits. per block the population
+FOR, the share of the window dismissed and the realized FOR of each policy, and on the replay the largest number of
+attacks among any 1 / epsilon consecutive dismissed sessions of the block, the burst the simulated stream lacks.
 
-figures. bounds_over_time, one draw of one policy, the count, both bounds and epsilon times the sessions through the
-stream. for_by_block, the population FOR of each policy's threshold in every block. alarm_by_policy, the share of
-draws with an alarm, the false alarms and the block of the alarm per policy and arm. leakage_by_policy, the attacks
-dismissed until the switch off per policy and arm against the bound of Theorem 3.
+figures, one row of panels per stream. bounds_over_time, one draw of one policy, the count, both bounds and epsilon
+times the sessions through the stream. for_by_block, the population FOR of each policy's threshold in every block.
+alarm_by_policy, the share of draws with an alarm, the false alarms and the block of the alarm per policy and arm.
+leakage_by_policy, the attacks dismissed until the switch off per policy and arm against the bound of Theorem 3.
 """
+
+
+import string
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -62,6 +78,8 @@ from forge.data.synthetic import draw_counts
 from forge.eval.metrics import share_with_interval
 from forge.eval.windows import rates
 from forge.monitor import rule
+from forge.monitor.replay import (assemble_stream, block_rows, check_block, dismissed_stream, thin, thin_rates,
+                                  window_counts)
 from forge.monitor.sequence import KINDS, Sequence, Tables, leakage_bound
 from forge.viz import layout, style
 from forge.viz.export import save_figure
@@ -90,6 +108,10 @@ ARM_SHORT = {"monitor": "FORGE-Monitor", "monitor_year": "FORGE-Monitor per year
              "naive": "running estimate"}
 STATE_CODES = {name: code for code, name in enumerate(rule.STATES)}
 LOW, HIGH = 0.05, 0.95
+# the kinds of stream, and the one the paper reads where a run has it
+STREAMS = ["simulated", "replay"]
+STREAM_LABELS = {"simulated": "simulated stream", "replay": "replayed stream"}
+MAIN_STREAM = "replay"
 
 
 def load_source(cfg: dict) -> dict:
@@ -410,6 +432,189 @@ def _with_prefix(prefix: str, d: dict) -> dict:
     return {f"{prefix}_{key}": value for key, value in d.items()}
 
 
+def load_replay(source: dict, windows: pd.DataFrame, log) -> list:
+    """the rows of every block in their real order from the per session scores the source run saved, split by class
+    and binned at the grid, checked against the block histograms of the run.
+
+    the scores of a year sit in the order of the processed table, the real order of the test file, so a block is a
+    stretch of that year of equal session count, as e11 cut it.
+    """
+    path = Path(source["dir"]) / "results" / "scores.npz"
+    if not path.is_file():
+        raise FileNotFoundError(f"the replay needs {path}, the per session scores of the source run, which the export "
+                                "leaves out of the mirror, so the run must come from the runs folder of Drive")
+    hist, scfg = source["hist"], source["cfg"]
+    per_year = scfg["dataset"]["blocks_per_year"]
+    with np.load(path) as z:
+        year = z["year"]
+        score = z["score"]
+        code = z["attack_type"]
+    if (np.diff(year) < 0).any():
+        raise ValueError("the saved scores are not in year order")
+    blocks = []
+    for i, win in enumerate(windows.itertuples()):
+        lo, hi = np.searchsorted(year, [win.year, win.year + 1], side="left")
+        edges = lo + np.searchsorted(np.arange(hi - lo) * per_year // (hi - lo), [win.block, win.block + 1],
+                                     side="left")
+        block = block_rows(score[edges[0]:edges[1]], code[edges[0]:edges[1]], hist["grid"])
+        if not check_block(block, hist["grid"], hist["window_benign_below"][i], hist["window_family_below"][i],
+                           hist["window_sizes"][i], code[edges[0]:edges[1]]):
+            raise ValueError(f"the saved scores of {win.year} block {win.block} do not give the block histogram of "
+                             "the source run")
+        blocks.append(block)
+    log(f"replay, per session scores of the source run read, {sum(len(b.a_score) + len(b.b_score) for b in blocks)} "
+        f"sessions in {len(blocks)} blocks, the block histograms of the source run reproduced from the saved scores "
+        "in every block")
+    return blocks
+
+
+def _threshold_rate(t, curve):
+    hit = t >= 0
+    return np.where(hit, curve[np.maximum(t, 0)], 0.0)
+
+
+def simulated_composition(co: dict, source: dict, policies, windows, thresholds, certify_window, fixed_index: int,
+                          pi_cal: float, eps: float, q: float, stream_seeds, log) -> dict:
+    """the thresholds, the dismissed sessions, the population FOR and the audited stream of every policy on the
+    simulated stream of one composition, the windows drawn again with the seeds of the source run."""
+    scfg, ssum, hist, sdraws = (source[key] for key in ("cfg", "summary", "hist", "draws"))
+    dep = scfg["deployment"]
+    draws, w_count = int(ssum["draws"]), len(windows)
+    pi = co["prevalence"]
+    j = dep["prevalences"].index(pi)
+    k_online = dep["mixes"].index("window")
+    cells = w_count * len(dep["prevalences"]) * len(dep["mixes"])
+    seeds = np.random.SeedSequence(scfg["seed"]).spawn(1 + 2 * cells)
+    index = {p: np.full((w_count, draws), -1, dtype=np.int64) for p in policies}
+    dismissed = {p: np.zeros((w_count, draws), dtype=np.int64) for p in policies}
+    rate = {p: np.zeros((w_count, draws)) for p in policies}
+    n_window = np.zeros(w_count, dtype=np.int64)
+    recal = np.full(draws, fixed_index, dtype=np.int64)
+    for i, win in enumerate(windows.itertuples()):
+        counts = block_counts(hist, i)
+        b_w, m_w, _, shares_w = rates(counts)
+        n_w = int(round(counts["sizes"][0] / (1 - pi)))
+        n_window[i] = n_w
+        rng = np.random.default_rng(seeds[window_stream(source, i, pi)])
+        drawn = draw_counts(rng, n_w, pi, shares_w, b_w, m_w, draws)
+        attack_below = drawn.family_below.sum(1)
+        window_below = drawn.benign_below + attack_below
+        curve = for_from_rates(pi, shares_w @ m_w, b_w)
+        for p in policies:
+            if p == "forge_online":
+                if [int(win.year), int(win.block), pi, "window"] in ssum["skipped"]:
+                    t = np.full(draws, -1, dtype=np.int64)
+                else:
+                    t = sdraws["online_index"][i, j, k_online].astype(np.int64)
+                    online = certify_window(window_below, np.full(draws, n_w))
+                    if not np.array_equal(online["index"], t):
+                        raise ValueError(f"the online thresholds of window {i} at prevalence {pi} could not be "
+                                         f"reproduced")
+            elif p == "recalibration":
+                t = recal
+            else:
+                t = thresholds[p]
+            hit = t >= 0
+            index[p][i] = t
+            dismissed[p][i] = np.where(hit, np.take_along_axis(window_below, np.maximum(t, 0)[:, None], 1)[:, 0], 0)
+            rate[p][i] = _threshold_rate(t, curve)
+        if "recalibration" in policies:
+            recal = recalibrate(window_below, attack_below, n_w, drawn.n_family.sum(1), recal, pi_cal, eps)
+    log(f"composition {co['name']}, prevalence {pi}, windows of {n_window.min()} to {n_window.max()} sessions, online "
+        "thresholds of the source run reproduced in every window")
+    out = {"n_window": n_window}
+    for pj, p in enumerate(policies):
+        rng = np.random.default_rng(stream_seeds[pj])
+        out[p] = {"index": index[p], "dismissed": dismissed[p], "rate": rate[p],
+                  "stream": audited_stream(rng, dismissed[p], rate[p], q), "burst": None}
+    return out
+
+
+def replayed_composition(co: dict, source: dict, blocks: list, policies, windows, thresholds, certifier_of,
+                         fixed_index: int, pi_cal: float, eps: float, q: float, chunk: int, thin_seeds, coin_seeds,
+                         log) -> dict:
+    """the same on the replayed stream, the sessions of every block in their real order thinned to the composition's
+    prevalence, a chunk of draws at a time. the online certificate and the recalibration refit read the replayed
+    window's own counts at the grid, and certifier_of gives the online certifier of a slice of the calibration
+    draws, since the window of a draw is certified against its own calibration set."""
+    ssum, hist = source["summary"], source["hist"]
+    draws, w_count, g = int(ssum["draws"]), len(windows), len(hist["grid"])
+    pi = co["prevalence"]
+    floor = rule.alarm_floor(eps)
+    index = {p: np.full((w_count, draws), -1, dtype=np.int64) for p in policies}
+    counted = {name: {p: np.zeros((w_count, draws), dtype=np.int64) for p in policies}
+               for name in ("dismissed", "attacks", "audited_attacks", "audited_benign", "burst")}
+    rate = {p: np.zeros((w_count, draws)) for p in policies}
+    parts = {p: [] for p in policies}
+    offset = {p: np.zeros(draws, dtype=np.int64) for p in policies}
+    before = {p: np.zeros(draws, dtype=np.int64) for p in policies}
+    n_window = np.zeros(w_count, dtype=np.int64)
+    kept = np.zeros(w_count)
+    short = []
+    recal = np.full(draws, fixed_index, dtype=np.int64)
+    thin_rngs = [np.random.default_rng(seed) for seed in thin_seeds]
+    coin_rngs = {p: np.random.default_rng(seed) for p, seed in zip(policies, coin_seeds)}
+    for i, win in enumerate(windows.itertuples()):
+        counts = block_counts(hist, i)
+        b_w, m_w, _, shares_w = rates(counts)
+        n_b, n_a = int(counts["sizes"][0]), int(counts["sizes"][1:].sum())
+        n_w = int(round(n_b / (1 - pi)))
+        n_window[i] = n_w
+        kept[i], _ = thin_rates(n_b, n_a, n_w, pi, False)
+        if n_w * pi > n_a:
+            short.append(i)
+        curve = for_from_rates(pi, shares_w @ m_w, b_w)
+        block = blocks[i]
+        for lo in range(0, draws, chunk):
+            d = slice(lo, min(lo + chunk, draws))
+            th = thin(thin_rngs[i], block, kept[i], 1.0, d.stop - d.start)
+            attack_below, benign_below = window_counts(block, th, g)
+            window_below = benign_below + attack_below
+            n_w_d = th.n_benign + th.n_attacks
+            online = None
+            if "forge_online" in policies:
+                online = np.asarray(certifier_of(d)(window_below, n_w_d)["index"], dtype=np.int64)
+            for p in policies:
+                if p == "forge_online":
+                    t = online
+                elif p == "recalibration":
+                    t = recal[d]
+                else:
+                    t = thresholds[p][d]
+                out = dismissed_stream(coin_rngs[p], block, th, t, q, floor)
+                index[p][i, d] = t
+                rate[p][i, d] = _threshold_rate(t, curve)
+                for name in counted:
+                    counted[name][p][i, d] = out[name]
+                rows = out["ev_row"] + lo
+                parts[p].append((rows, out["ev_pos"] + offset[p][rows], out["ev_count"] + before[p][rows], i))
+                offset[p][d] += out["dismissed"]
+                before[p][d] += out["attacks"]
+            if "recalibration" in policies:
+                recal[d] = recalibrate(window_below, attack_below, n_w_d, th.n_attacks, recal[d], pi_cal, eps)
+    log(f"replay, composition {co['name']}, prevalence {pi}, every attack row of a block kept with probability "
+        f"{kept.min():.4f} to {kept.max():.4f}, {len(short)} blocks short of attacks keep all of them, windows of "
+        f"{n_window.min()} to {n_window.max()} sessions")
+    out = {"n_window": n_window, "short": short}
+    for p in policies:
+        stream = assemble_stream(draws, parts[p], counted["dismissed"][p], counted["attacks"][p],
+                                 counted["audited_attacks"][p], counted["audited_benign"][p])
+        out[p] = {"index": index[p], "dismissed": counted["dismissed"][p], "rate": rate[p], "stream": stream,
+                  "burst": counted["burst"][p]}
+    return out
+
+
+def main_stream(summary: dict) -> str:
+    # the stream the paper reads, the replay where the run has it, else the one stream of the run
+    streams = summary.get("streams", ["simulated"])
+    return MAIN_STREAM if MAIN_STREAM in streams else streams[0]
+
+
+def of_stream(table: pd.DataFrame, stream: str) -> pd.DataFrame:
+    # the rows of one stream, every row of a table from a run with the simulated stream alone
+    return table[table["stream"] == stream] if "stream" in table else table
+
+
 def run(cfg: dict, run: runs.Run) -> None:
     m, au, sim = cfg["monitor"], cfg["audits"], cfg["simulation"]
     eps, delta, q = m["epsilon"], m["delta"], au["rate"]
@@ -421,15 +626,21 @@ def run(cfg: dict, run: runs.Run) -> None:
     if not 0 < q <= 1:
         raise ValueError(f"the audit rate is {q}, expected a probability above 0")
     policies, arms, compositions = list(cfg["policies"]), list(cfg["arms"]), list(cfg["compositions"])
-    unknown = (set(policies) - set(POLICIES)) | (set(arms) - set(ARMS))
+    streams = list(cfg.get("streams", ["simulated"]))
+    unknown = (set(policies) - set(POLICIES)) | (set(arms) - set(ARMS)) | (set(streams) - set(STREAMS))
     if unknown:
-        raise ValueError(f"unknown policies or arms {', '.join(sorted(unknown))}")
+        raise ValueError(f"unknown policies, arms or streams {', '.join(sorted(unknown))}")
+    if not streams or len(set(streams)) != len(streams):
+        raise ValueError(f"streams are {streams}, expected some of {', '.join(STREAMS)}, each once")
     names = [co["name"] for co in compositions]
     if len(set(names)) != len(names):
         raise ValueError("every composition needs its own name")
     trace = sim["trace"]
     if trace["policy"] not in policies or trace["composition"] not in names:
         raise ValueError("the trace names a policy or composition that is not run")
+    chunk = int(sim.get("chunk", 100))
+    if chunk < 1:
+        raise ValueError(f"chunk is {chunk}, expected 1 or more draws")
 
     source = load_source(cfg)
     scfg, ssum, hist, sdraws, windows = (source[key] for key in ("cfg", "summary", "hist", "draws", "windows"))
@@ -444,7 +655,8 @@ def run(cfg: dict, run: runs.Run) -> None:
     run.log(f"source {cfg['source']['experiment']} run {cfg['source']['run']}, {ssum['dataset']} "
             f"{ssum['processed_version']}, fingerprint {ssum['fingerprint']}, {w_count} windows of "
             f"{ssum['years']['deployment'][0]} to {ssum['years']['deployment'][-1]}, {draws} draws, "
-            f"{len(hist['grid'])} thresholds, families " + ", ".join("+".join(f) for f in ssum["families"]))
+            f"{len(hist['grid'])} thresholds, families " + ", ".join("+".join(f) for f in ssum["families"])
+            + ", streams " + ", ".join(streams))
 
     # the calibration draws of e11 again, which fix the online certifier and are checked against the saved offline
     # thresholds
@@ -463,6 +675,14 @@ def run(cfg: dict, run: runs.Run) -> None:
     if not np.array_equal(offline["index"], sdraws["forge_simplex_index"]):
         raise ValueError("the calibration draws of the source run could not be reproduced")
     certify_window = online_certifier(grouped_below, grouped_n, *args, **start)
+    certifiers = {}
+
+    def certifier_of(d: slice):
+        # the online certifier of a chunk of calibration draws, built once per chunk
+        if (d.start, d.stop) not in certifiers:
+            certifiers[(d.start, d.stop)] = online_certifier(grouped_below[d], grouped_n[d], *args, **start)
+        return certifiers[(d.start, d.stop)]
+
     thresholds = {p: sdraws[f"{p}_index"].astype(np.int64) for p in OFFLINE if p in policies}
     for p, index in thresholds.items():
         run.log(f"{p}, refused in {np.mean(index < 0):.3f} of the calibration sets of the source run")
@@ -474,177 +694,173 @@ def run(cfg: dict, run: runs.Run) -> None:
     per_block = Sequence(m["kind"], m["lower_ratios"], m["upper_ratios"], q, q, delta_lower / w_count,
                          (delta - delta_lower) / w_count)
     restarts = {"monitor_year": (tables, years), "monitor_block": (Tables(per_block, q, q), np.arange(w_count))}
-    stream_seeds = np.random.SeedSequence(cfg["seed"]).spawn(len(compositions) * len(policies))
-    rows, block_rows, saved, kept_trace = [], [], {}, None
-    k_online = dep["mixes"].index("window")
+    # the coins of the simulated stream take the first children of the seed, as they did before the replay, and the
+    # replay spawns its own after them, one per composition and window for the thinning and one per composition and
+    # policy for the coins
+    seed_sequence = np.random.SeedSequence(cfg["seed"])
+    stream_seeds = seed_sequence.spawn(len(compositions) * len(policies))
+    thin_seeds = seed_sequence.spawn(len(compositions) * w_count) if "replay" in streams else []
+    coin_seeds = seed_sequence.spawn(len(compositions) * len(policies)) if "replay" in streams else []
+    blocks = load_replay(source, windows, run.log) if "replay" in streams else None
+    fixed_index = int(ssum["fixed_index"])
+    rows, block_rows_, saved, traces, short = [], [], {}, {}, {}
     for ci, co in enumerate(compositions):
         pi = co["prevalence"]
-        j = dep["prevalences"].index(pi)
-        index = {p: np.full((w_count, draws), -1, dtype=np.int64) for p in policies}
-        dismissed = {p: np.zeros((w_count, draws), dtype=np.int64) for p in policies}
-        rate = {p: np.zeros((w_count, draws)) for p in policies}
-        n_window = np.zeros(w_count, dtype=np.int64)
-        recal = np.full(draws, int(ssum["fixed_index"]), dtype=np.int64)
-        for i, win in enumerate(windows.itertuples()):
-            counts = block_counts(hist, i)
-            b_w, m_w, _, shares_w = rates(counts)
-            n_w = int(round(counts["sizes"][0] / (1 - pi)))
-            n_window[i] = n_w
-            rng = np.random.default_rng(seeds[window_stream(source, i, pi)])
-            drawn = draw_counts(rng, n_w, pi, shares_w, b_w, m_w, draws)
-            attack_below = drawn.family_below.sum(1)
-            window_below = drawn.benign_below + attack_below
-            curve = for_from_rates(pi, shares_w @ m_w, b_w)
-            for p in policies:
-                if p == "forge_online":
-                    if [int(win.year), int(win.block), pi, "window"] in ssum["skipped"]:
-                        t = np.full(draws, -1, dtype=np.int64)
-                    else:
-                        t = sdraws["online_index"][i, j, k_online].astype(np.int64)
-                        online = certify_window(window_below, np.full(draws, n_w))
-                        if not np.array_equal(online["index"], t):
-                            raise ValueError(f"the online thresholds of window {i} at prevalence {pi} could not be "
-                                             f"reproduced")
-                elif p == "recalibration":
-                    t = recal
-                else:
-                    t = thresholds[p]
-                hit = t >= 0
-                index[p][i] = t
-                dismissed[p][i] = np.where(hit, np.take_along_axis(window_below, np.maximum(t, 0)[:, None], 1)[:, 0],
-                                           0)
-                rate[p][i] = np.where(hit, curve[np.maximum(t, 0)], 0.0)
-            if "recalibration" in policies:
-                recal = recalibrate(window_below, attack_below, n_w, drawn.n_family.sum(1), recal, pi_cal, eps)
-        run.log(f"composition {co['name']}, prevalence {pi}, windows of {n_window.min()} to {n_window.max()} "
-                f"sessions, online thresholds of the source run reproduced in every window")
-
-        for pj, p in enumerate(policies):
-            rng = np.random.default_rng(stream_seeds[ci * len(policies) + pj])
-            stream = audited_stream(rng, dismissed[p], rate[p], q)
-            out = judge_stream(tables, stream, rate[p], eps, delta, q, restarts)
-            n_end = stream["offsets"][-1]
+        results = {}
+        if "simulated" in streams:
+            results["simulated"] = simulated_composition(
+                co, source, policies, windows, thresholds, certify_window, fixed_index, pi_cal, eps, q,
+                stream_seeds[ci * len(policies):(ci + 1) * len(policies)], run.log)
+        if "replay" in streams:
+            results["replay"] = replayed_composition(
+                co, source, blocks, policies, windows, thresholds, certifier_of, fixed_index, pi_cal, eps, q,
+                chunk, thin_seeds[ci * w_count:(ci + 1) * w_count],
+                coin_seeds[ci * len(policies):(ci + 1) * len(policies)], run.log)
+            short[co["name"]] = [int(i) for i in results["replay"]["short"]]
+        for stream in streams:
+            res = results[stream]
+            n_window = res["n_window"]
             total_windows = n_window.sum()
-            held = dismissed[p] > 0
-            for w in range(w_count):
-                win = windows.iloc[w]
-                block_rows.append({
-                    "policy": p, "composition": co["name"], "prevalence": pi, "window": w, "year": int(win["year"]),
-                    "block": int(win["block"]), "period": win["period"], "position": float(win["position"]),
-                    "window_sessions": int(n_window[w]), "refused_rate": float(np.mean(~held[w])),
-                    "threshold_mean": float(index[p][w][held[w]].mean()) if held[w].any() else np.nan,
-                    "dismissed_share_mean": float((dismissed[p][w] / n_window[w]).mean()),
-                    "for_true_mean": float(rate[p][w][held[w]].mean()) if held[w].any() else np.nan,
-                    "for_true_median": float(np.median(rate[p][w][held[w]])) if held[w].any() else np.nan,
-                    "violated_rate": float(np.mean(held[w] & (rate[p][w] > eps))),
-                    "attacks_mean": float(stream["attacks"][w].mean()),
-                    "realized_for_mean": float(np.mean(stream["attacks"][w][held[w]] / dismissed[p][w][held[w]]))
-                    if held[w].any() else np.nan,
-                    **{f"state_{name}": float(np.mean(out["monitor"]["state"][w] == code))
-                       for name, code in STATE_CODES.items()},
-                    "window_audit_alarm_rate": float(out["window_audit"]["block_alarm"][w].mean()),
-                    "window_audit_certified_rate": float(out["window_audit"]["block_certified"][w].mean()),
-                })
-            onset = {"onset_true_rate": float(np.mean(out["onset_true"] >= 0)),
-                     **_with_prefix("onset_true_block", _quantiles(out["onset_true"] + 1, out["onset_true"] >= 0)),
-                     "onset_realized_rate": float(np.mean(out["onset_realized"] >= 0)),
-                     **_with_prefix("onset_realized_block",
-                                    _quantiles(out["onset_realized"] + 1, out["onset_realized"] >= 0))}
-            for arm in arms:
-                r = out[arm]
-                alarmed = r["alarmed"]
-                row = {
-                    "policy": p, "composition": co["name"], "prevalence": pi, "arm": arm, "draws": draws,
-                    "refused_rate": float(np.mean(n_end == 0)), "stream_sessions_mean": float(n_end.mean()),
-                    "alarm_rate": float(alarmed.mean()), "false_alarm_rate": float(r["false_alarm"].mean()),
-                    **_with_prefix("alarm_block", _quantiles(r["alarm_block"] + 1, alarmed)),
-                    **_with_prefix("alarm_session", _quantiles(r["alarm_pos"], alarmed)),
-                    **onset,
-                    **_with_prefix("leak", _quantiles(r["leak"], np.ones(draws, dtype=bool))),
-                    "leak_mean": float(r["leak"].mean()),
-                    **_with_prefix("excess", _quantiles(r["leak"] - eps * r["sessions"], np.ones(draws, dtype=bool))),
-                    **_with_prefix("sessions", _quantiles(r["sessions"], np.ones(draws, dtype=bool))),
-                    "dismissed_share_mean": float((r["sessions"] / total_windows).mean()),
-                    **_with_prefix("realized_for", _quantiles(np.divide(r["leak"], r["sessions"],
-                                                                        out=np.zeros(draws), where=r["sessions"] > 0),
-                                                              r["sessions"] > 0)),
-                    "audits_mean": float(out["audits"].mean()),
-                }
-                if arm in MONITORS:
-                    either = r["miss_lower"] | r["miss_upper"]
-                    row.update({
-                        "miscover": int(either.sum()), **share_with_interval(int(either.sum()), draws, "miscover_"),
-                        "miscover_lower_rate": float(r["miss_lower"].mean()),
-                        "miscover_upper_rate": float(r["miss_upper"].mean()),
-                        "sequences": int(r.get("sequences", 1)),
-                        "miscover_sequence_rate": float(r["failed_sequences"].mean()) if "failed_sequences" in r
-                        else float(either.mean()),
-                        **_with_prefix("bound", _quantiles(r["bound"], alarmed)),
-                        "over_bound_rate": float(r["over_bound"].sum() / max(alarmed.sum(), 1)),
-                        **{f"blocks_{name}_mean": float((r["state"] == code).sum(0).mean())
+            for p in policies:
+                r_p = res[p]
+                index, dismissed, rate, burst = r_p["index"], r_p["dismissed"], r_p["rate"], r_p["burst"]
+                out = judge_stream(tables, r_p["stream"], rate, eps, delta, q, restarts)
+                n_end = r_p["stream"]["offsets"][-1]
+                held = dismissed > 0
+                for w in range(w_count):
+                    win = windows.iloc[w]
+                    block_rows_.append({
+                        "stream": stream, "policy": p, "composition": co["name"], "prevalence": pi, "window": w,
+                        "year": int(win["year"]), "block": int(win["block"]), "period": win["period"],
+                        "position": float(win["position"]), "window_sessions": int(n_window[w]),
+                        "refused_rate": float(np.mean(~held[w])),
+                        "threshold_mean": float(index[w][held[w]].mean()) if held[w].any() else np.nan,
+                        "dismissed_share_mean": float((dismissed[w] / n_window[w]).mean()),
+                        "for_true_mean": float(rate[w][held[w]].mean()) if held[w].any() else np.nan,
+                        "for_true_median": float(np.median(rate[w][held[w]])) if held[w].any() else np.nan,
+                        "violated_rate": float(np.mean(held[w] & (rate[w] > eps))),
+                        "attacks_mean": float(r_p["stream"]["attacks"][w].mean()),
+                        "realized_for_mean": float(np.mean(r_p["stream"]["attacks"][w][held[w]]
+                                                           / dismissed[w][held[w]])) if held[w].any() else np.nan,
+                        "burst_max_median": float(np.median(burst[w])) if burst is not None else np.nan,
+                        "burst_max_high": float(np.quantile(burst[w], HIGH)) if burst is not None else np.nan,
+                        **{f"state_{name}": float(np.mean(out["monitor"]["state"][w] == code))
                            for name, code in STATE_CODES.items()},
+                        "window_audit_alarm_rate": float(out["window_audit"]["block_alarm"][w].mean()),
+                        "window_audit_certified_rate": float(out["window_audit"]["block_certified"][w].mean()),
                     })
-                if arm == "window_audit":
-                    row.update({"block_false_alarm_rate": float(r["block_false_alarm"].mean()),
-                                "blocks_certified_mean": float(r["block_certified"].sum(0).mean())})
-                rows.append(row)
-            key = f"{p}|{co['name']}|"
-            saved[key + "attacks"] = stream["attacks"]
-            saved[key + "dismissed"] = dismissed[p]
-            saved[key + "for_true"] = rate[p].astype(np.float32)
-            for arm in arms:
-                saved[key + f"{arm}_alarm_pos"] = out[arm]["alarm_pos"]
-                saved[key + f"{arm}_leak"] = out[arm]["leak"]
-                if arm in MONITORS:
-                    saved[key + f"{arm}_state"] = out[arm]["state"]
-                    saved[key + f"{arm}_bound"] = out[arm]["bound"]
-            if p == trace["policy"] and co["name"] == trace["composition"]:
-                kept_trace = {**out["trace"], "window_sessions": n_window, "years": windows["year"].to_numpy()}
-            by_arm = {x["arm"]: x for x in rows if x["policy"] == p and x["composition"] == co["name"]}
-            line = (f"{p}, composition {co['name']}, population FOR above epsilon in a first block for "
-                    f"{onset['onset_true_rate']:.3f} of draws at block {onset['onset_true_block_median']:.0f}, "
-                    f"realized count above epsilon times the sessions at a block end for "
-                    f"{onset['onset_realized_rate']:.3f} at block {onset['onset_realized_block_median']:.0f}")
-            if "none" in by_arm:
-                line += f", {by_arm['none']['leak_median']:.0f} attacks dismissed without monitoring"
-            for arm in arms:
-                if arm == "none":
-                    continue
-                x = by_arm[arm]
-                when = (f"at block {x['alarm_block_median']:.0f} after {x['alarm_session_median']:.0f} sessions"
-                        if x["alarm_rate"] > 0 else "never")
-                line += (f", {ARM_SHORT[arm]} alarm in {x['alarm_rate']:.4f} of draws, false in "
-                         f"{x['false_alarm_rate']:.4f}, {when}, leakage median {x['leak_median']:.0f}")
-                if arm in MONITORS:
-                    line += (f", bounds left in {x['miscover_rate']:.4f}, above the bound in {x['over_bound_rate']:.4f}"
-                             f" of alarms, certified blocks {x['blocks_certified_mean']:.1f}")
-                if arm != "monitor" and arm in MONITORS:
-                    line += f", {x['sequences']} sequences, one left in {x['miscover_sequence_rate']:.4f}"
-            run.log(line)
+                onset = {"onset_true_rate": float(np.mean(out["onset_true"] >= 0)),
+                         **_with_prefix("onset_true_block", _quantiles(out["onset_true"] + 1, out["onset_true"] >= 0)),
+                         "onset_realized_rate": float(np.mean(out["onset_realized"] >= 0)),
+                         **_with_prefix("onset_realized_block",
+                                        _quantiles(out["onset_realized"] + 1, out["onset_realized"] >= 0))}
+                for arm in arms:
+                    r = out[arm]
+                    alarmed = r["alarmed"]
+                    row = {
+                        "stream": stream, "policy": p, "composition": co["name"], "prevalence": pi, "arm": arm,
+                        "draws": draws, "refused_rate": float(np.mean(n_end == 0)),
+                        "stream_sessions_mean": float(n_end.mean()),
+                        "alarm_rate": float(alarmed.mean()), "false_alarm_rate": float(r["false_alarm"].mean()),
+                        **_with_prefix("alarm_block", _quantiles(r["alarm_block"] + 1, alarmed)),
+                        **_with_prefix("alarm_session", _quantiles(r["alarm_pos"], alarmed)),
+                        **onset,
+                        **_with_prefix("leak", _quantiles(r["leak"], np.ones(draws, dtype=bool))),
+                        "leak_mean": float(r["leak"].mean()),
+                        **_with_prefix("excess", _quantiles(r["leak"] - eps * r["sessions"],
+                                                            np.ones(draws, dtype=bool))),
+                        **_with_prefix("sessions", _quantiles(r["sessions"], np.ones(draws, dtype=bool))),
+                        "dismissed_share_mean": float((r["sessions"] / total_windows).mean()),
+                        **_with_prefix("realized_for", _quantiles(np.divide(r["leak"], r["sessions"],
+                                                                            out=np.zeros(draws),
+                                                                            where=r["sessions"] > 0),
+                                                                  r["sessions"] > 0)),
+                        "audits_mean": float(out["audits"].mean()),
+                    }
+                    if arm in MONITORS:
+                        either = r["miss_lower"] | r["miss_upper"]
+                        row.update({
+                            "miscover": int(either.sum()), **share_with_interval(int(either.sum()), draws, "miscover_"),
+                            "miscover_lower_rate": float(r["miss_lower"].mean()),
+                            "miscover_upper_rate": float(r["miss_upper"].mean()),
+                            "sequences": int(r.get("sequences", 1)),
+                            "miscover_sequence_rate": float(r["failed_sequences"].mean()) if "failed_sequences" in r
+                            else float(either.mean()),
+                            **_with_prefix("bound", _quantiles(r["bound"], alarmed)),
+                            "over_bound_rate": float(r["over_bound"].sum() / max(alarmed.sum(), 1)),
+                            **{f"blocks_{name}_mean": float((r["state"] == code).sum(0).mean())
+                               for name, code in STATE_CODES.items()},
+                        })
+                    if arm == "window_audit":
+                        row.update({"block_false_alarm_rate": float(r["block_false_alarm"].mean()),
+                                    "blocks_certified_mean": float(r["block_certified"].sum(0).mean())})
+                    rows.append(row)
+                key = f"{stream}|{p}|{co['name']}|"
+                saved[key + "attacks"] = r_p["stream"]["attacks"]
+                saved[key + "dismissed"] = dismissed
+                saved[key + "for_true"] = rate.astype(np.float32)
+                if burst is not None:
+                    saved[key + "burst"] = burst
+                for arm in arms:
+                    saved[key + f"{arm}_alarm_pos"] = out[arm]["alarm_pos"]
+                    saved[key + f"{arm}_leak"] = out[arm]["leak"]
+                    if arm in MONITORS:
+                        saved[key + f"{arm}_state"] = out[arm]["state"]
+                        saved[key + f"{arm}_bound"] = out[arm]["bound"]
+                if p == trace["policy"] and co["name"] == trace["composition"]:
+                    traces.update({f"{stream}|{k}": v for k, v in
+                                   {**out["trace"], "window_sessions": n_window,
+                                    "years": windows["year"].to_numpy()}.items()})
+                by_arm = {x["arm"]: x for x in rows if x["stream"] == stream and x["policy"] == p
+                          and x["composition"] == co["name"]}
+                line = (f"{stream}, {p}, composition {co['name']}, population FOR above epsilon in a first block for "
+                        f"{onset['onset_true_rate']:.3f} of draws at block {onset['onset_true_block_median']:.0f}, "
+                        f"realized count above epsilon times the sessions at a block end for "
+                        f"{onset['onset_realized_rate']:.3f} at block {onset['onset_realized_block_median']:.0f}")
+                if "none" in by_arm:
+                    line += f", {by_arm['none']['leak_median']:.0f} attacks dismissed without monitoring"
+                for arm in arms:
+                    if arm == "none":
+                        continue
+                    x = by_arm[arm]
+                    when = (f"at block {x['alarm_block_median']:.0f} after {x['alarm_session_median']:.0f} sessions"
+                            if x["alarm_rate"] > 0 else "never")
+                    line += (f", {ARM_SHORT[arm]} alarm in {x['alarm_rate']:.4f} of draws, false in "
+                             f"{x['false_alarm_rate']:.4f}, {when}, leakage median {x['leak_median']:.0f}")
+                    if arm in MONITORS:
+                        line += (f", bounds left in {x['miscover_rate']:.4f}, above the bound in "
+                                 f"{x['over_bound_rate']:.4f} of alarms, certified blocks "
+                                 f"{x['blocks_certified_mean']:.1f}")
+                    if arm != "monitor" and arm in MONITORS:
+                        line += f", {x['sequences']} sequences, one left in {x['miscover_sequence_rate']:.4f}"
+                run.log(line)
+        del results
 
     claims = pd.DataFrame(rows)
     run.save_table(claims, "claims")
-    run.save_table(pd.DataFrame(block_rows), "blocks")
+    run.save_table(pd.DataFrame(block_rows_), "blocks")
     run.save_table(windows, "windows")
     run.save_arrays("draws", **saved)
-    run.save_arrays("trace", **kept_trace)
+    run.save_arrays("trace", **traces)
     exceeds = {}
-    for arm in [a for a in MONITORS if a in arms]:
-        g = claims[claims["arm"] == arm]
-        if arm == "monitor_year":
-            # a sequence per year holds its level per sequence, so the check reads the share of failing sequences
-            worst = g.loc[g["miscover_sequence_rate"].idxmax()]
-            exceeds[arm] = bool((g["miscover_sequence_rate"] > delta).any())
-            run.log(f"{ARM_SHORT[arm]}, largest share of sequences leaving the bounds "
-                    f"{worst['miscover_sequence_rate']:.4f} on {worst['policy']} at composition "
-                    f"{worst['composition']}, over {int(worst['sequences'])} sequences per draw, delta {delta}, "
-                    f"above delta {exceeds[arm]}")
-            continue
-        worst = g.loc[g["miscover_rate"].idxmax()]
-        exceeds[arm] = bool((g["miscover_low"] > delta).any())
-        run.log(f"{ARM_SHORT[arm]}, largest share of draws leaving the bounds {worst['miscover_rate']:.4f} on "
-                f"{worst['policy']} at composition {worst['composition']}, 95% interval {worst['miscover_low']:.4f} "
-                f"to {worst['miscover_high']:.4f}, delta {delta}, above delta beyond simulation noise {exceeds[arm]}")
+    for stream in streams:
+        for arm in [a for a in MONITORS if a in arms]:
+            g = claims[(claims["stream"] == stream) & (claims["arm"] == arm)]
+            if arm == "monitor_year":
+                # a sequence per year holds its level per sequence, so the check reads the share of failing sequences
+                worst = g.loc[g["miscover_sequence_rate"].idxmax()]
+                exceeds[f"{stream}|{arm}"] = bool((g["miscover_sequence_rate"] > delta).any())
+                run.log(f"{stream}, {ARM_SHORT[arm]}, largest share of sequences leaving the bounds "
+                        f"{worst['miscover_sequence_rate']:.4f} on {worst['policy']} at composition "
+                        f"{worst['composition']}, over {int(worst['sequences'])} sequences per draw, delta {delta}, "
+                        f"above delta {exceeds[f'{stream}|{arm}']}")
+                continue
+            worst = g.loc[g["miscover_rate"].idxmax()]
+            exceeds[f"{stream}|{arm}"] = bool((g["miscover_low"] > delta).any())
+            run.log(f"{stream}, {ARM_SHORT[arm]}, largest share of draws leaving the bounds "
+                    f"{worst['miscover_rate']:.4f} on {worst['policy']} at composition {worst['composition']}, 95% "
+                    f"interval {worst['miscover_low']:.4f} to {worst['miscover_high']:.4f}, delta {delta}, above "
+                    f"delta beyond simulation noise {exceeds[f'{stream}|{arm}']}")
     run.save_json({
         "source": {**cfg["source"], "fingerprint": ssum["fingerprint"], "dataset": ssum["dataset"],
                    "processed_version": ssum["processed_version"], "draws": draws, "windows": w_count,
@@ -654,6 +870,8 @@ def run(cfg: dict, run: runs.Run) -> None:
         "lower_ratios": m["lower_ratios"], "upper_ratios": m["upper_ratios"], "audit_rate": q,
         "alarm_floor": rule.alarm_floor(eps),
         "calibration_prevalence": pi_cal, "policies": policies, "arms": arms, "compositions": compositions,
+        "streams": streams, "main_stream": MAIN_STREAM if MAIN_STREAM in streams else streams[0],
+        "chunk": chunk, "replay_blocks_short_of_attacks": short,
         "trace": trace, "miscoverage_exceeds_delta": exceeds,
         "restart_sequences": {"monitor_year": int(years.max()) + 1, "monitor_block": w_count},
     }, "summary")
@@ -684,38 +902,56 @@ def _period_lines(ax, summary: dict) -> None:
             ax.axvline(first, color=style.GRAY, linestyle=":", linewidth=1)
 
 
+def _trace_streams(t: dict) -> list:
+    # the traces saved per stream, keyed by the stream name, or the one trace of a run from before the streams
+    found = [s for s in STREAMS if any(k.startswith(f"{s}|") for k in t)]
+    if not found:
+        return [(None, t)]
+    return [(s, {k.split("|", 1)[1]: v for k, v in t.items() if k.startswith(f"{s}|")}) for s in found]
+
+
+def _stream_word(stream, streams) -> str:
+    return f"\n{STREAM_LABELS[stream]}" if stream is not None and len(streams) > 1 else ""
+
+
 def fig_bounds_over_time(run_dir) -> plt.Figure:
     style.use()
-    t = runs.load_arrays(run_dir, "trace")
+    traces = _trace_streams(runs.load_arrays(run_dir, "trace"))
     summary = runs.load_json(run_dir, "summary")
     eps = summary["epsilon"]
     scale = 1e6
     color = style.color_for("forge_simplex")
-    fig, ax = plt.subplots(figsize=(style.WIDTH_SINGLE, 2.6))
-    # the count is known at the audited attacks and at the block ends, the bounds move at the audited attacks only
-    x = np.concatenate([t["ev_pos"], t["ends"]]) / scale
-    y = np.concatenate([t["ev_count"], t["cum_attacks"]])
-    order = np.argsort(x, kind="stable")
-    ax.plot(x[order], y[order], color=style.INK, linewidth=1, label="attacks among the dismissed sessions")
-    pos = t["ev_pos"] / scale
-    n_end = t["n_end"] / scale
-    ax.step(np.r_[pos, n_end], np.r_[t["lcb"], t["lcb"][-1]], where="post", color=color, linewidth=1.2,
-            label="lower bound")
-    ax.step(np.r_[pos, n_end], np.r_[t["ucb"], t["ucb"][-1]], where="post", color=color, linestyle="--",
-            linewidth=1.2, label="upper bound")
-    ax.plot([0, n_end], [0, eps * t["n_end"]], color=style.GRAY, linestyle=":", linewidth=1,
-            label=r"$\varepsilon$ times the dismissed sessions")
-    # the first block of every year
-    years = t["years"]
-    for w in np.flatnonzero(np.r_[False, years[1:] != years[:-1]]):
-        ax.axvline(t["ends"][w - 1] / scale, color=style.GRAY, linestyle=":", linewidth=0.6)
-    if t["alarm_pos"] >= 0:
-        ax.axvline(t["alarm_pos"] / scale, color=color, linestyle="-.", linewidth=0.8)
-    ax.set_xlim(0, n_end)
-    ax.set_ylim(0, 1.1 * max(float(t["ucb"].max()), float(y.max()), 1.0))
-    ax.set_xlabel("millions of dismissed sessions")
-    ax.set_ylabel("attacks")
-    layout.legend_below(fig, ax, ["attacks among the dismissed sessions", "lower bound", "upper bound"], ncol=2)
+    fig, axes = plt.subplots(1, len(traces), figsize=(style.WIDTH_SINGLE if len(traces) == 1 else style.WIDTH_DOUBLE,
+                                                      2.6), squeeze=False)
+    # the count is known at the audited attacks and at the block ends, the bounds move at the audited attacks only,
+    # one panel per stream
+    for ax, (stream, t), letter in zip(axes[0], traces, string.ascii_lowercase):
+        x = np.concatenate([t["ev_pos"], t["ends"]]) / scale
+        y = np.concatenate([t["ev_count"], t["cum_attacks"]])
+        order = np.argsort(x, kind="stable")
+        ax.plot(x[order], y[order], color=style.INK, linewidth=1, label="attacks among the dismissed sessions")
+        pos = t["ev_pos"] / scale
+        n_end = t["n_end"] / scale
+        ax.step(np.r_[pos, n_end], np.r_[t["lcb"], t["lcb"][-1]], where="post", color=color, linewidth=1.2,
+                label="lower bound")
+        ax.step(np.r_[pos, n_end], np.r_[t["ucb"], t["ucb"][-1]], where="post", color=color, linestyle="--",
+                linewidth=1.2, label="upper bound")
+        ax.plot([0, n_end], [0, eps * t["n_end"]], color=style.GRAY, linestyle=":", linewidth=1,
+                label=r"$\varepsilon$ times the dismissed sessions")
+        # the first block of every year
+        years = t["years"]
+        for w in np.flatnonzero(np.r_[False, years[1:] != years[:-1]]):
+            ax.axvline(t["ends"][w - 1] / scale, color=style.GRAY, linestyle=":", linewidth=0.6)
+        if t["alarm_pos"] >= 0:
+            ax.axvline(t["alarm_pos"] / scale, color=color, linestyle="-.", linewidth=0.8)
+        ax.set_xlim(0, n_end)
+        ax.set_ylim(0, 1.1 * max(float(t["ucb"].max()), float(y.max()), 1.0))
+        ax.set_xlabel("millions of dismissed sessions" + _stream_word(stream, traces).replace("\n", ", "))
+        if len(traces) > 1:
+            layout.panel_letter(ax, letter)
+    axes[0, 0].set_ylabel("attacks")
+    layout.legend_below(fig, axes[0, 0], ["attacks among the dismissed sessions", "lower bound", "upper bound"],
+                        ncol=2)
     return fig
 
 
@@ -725,27 +961,32 @@ def fig_for_by_block(run_dir) -> plt.Figure:
     summary = runs.load_json(run_dir, "summary")
     policies = [p for p in POLICIES if p in summary["policies"]]
     compositions = summary["compositions"]
-    fig, axes = plt.subplots(1, len(compositions), figsize=(style.WIDTH_DOUBLE, 2.6), sharex=True, sharey=True,
-                             squeeze=False)
-    axes = axes[0]
-    # the population FOR of each policy's threshold in every block, a dismissed share of zero has no rate
+    streams = summary.get("streams", [None])
+    fig, axes = plt.subplots(len(streams), len(compositions), figsize=(style.WIDTH_DOUBLE, 2.6 * len(streams)),
+                             sharex=True, sharey=True, squeeze=False)
+    # the population FOR of each policy's threshold in every block, one row per stream, a dismissed share of zero
+    # has no rate
     floor = summary["epsilon"] / 100
     deployment = summary["source"]["years"]["deployment"]
-    for ax, co, letter in zip(axes, compositions, "abcdef"):
-        g = blocks[blocks["composition"] == co["name"]]
-        for p in policies:
-            h = g[g["policy"] == p].sort_values("position")
-            ax.plot(h["position"], h["for_true_mean"].clip(lower=floor), markersize=2.5, linewidth=1,
-                    **_policy_line(p))
-        ax.axhline(summary["epsilon"], color=style.GRAY, linestyle="--", linewidth=1, label=r"$\varepsilon$")
-        _period_lines(ax, summary)
-        ax.set_yscale("log")
-        ax.set_xlim(deployment[0], deployment[-1] + 1)
-        ax.set_xticks(np.arange(deployment[0], deployment[-1] + 2))
+    letters = iter(string.ascii_lowercase)
+    for row, stream in zip(axes, streams):
+        data = of_stream(blocks, stream) if stream is not None else blocks
+        for ax, co in zip(row, compositions):
+            g = data[data["composition"] == co["name"]]
+            for p in policies:
+                h = g[g["policy"] == p].sort_values("position")
+                ax.plot(h["position"], h["for_true_mean"].clip(lower=floor), markersize=2.5, linewidth=1,
+                        **_policy_line(p))
+            ax.axhline(summary["epsilon"], color=style.GRAY, linestyle="--", linewidth=1, label=r"$\varepsilon$")
+            _period_lines(ax, summary)
+            ax.set_yscale("log")
+            ax.set_xlim(deployment[0], deployment[-1] + 1)
+            ax.set_xticks(np.arange(deployment[0], deployment[-1] + 2))
+            layout.panel_letter(ax, next(letters))
+        row[0].set_ylabel("FOR of the block at the threshold" + _stream_word(stream, streams))
+    for ax, co in zip(axes[-1], compositions):
         ax.set_xlabel(f"deployment year, attack prevalence {style.percent(co['prevalence'])}")
-        layout.panel_letter(ax, letter)
-    axes[0].set_ylabel("FOR of the block at the threshold")
-    layout.legend_below(fig, axes[0], [POLICY_LABELS[p] for p in policies])
+    layout.legend_below(fig, axes[0, 0], [POLICY_LABELS[p] for p in policies])
     return fig
 
 
@@ -756,33 +997,40 @@ def fig_alarm_by_policy(run_dir) -> plt.Figure:
     policies = [p for p in POLICIES if p in summary["policies"]]
     arms = [a for a in [*MONITORS, "window_audit", "naive"] if a in summary["arms"]]
     compositions = summary["compositions"]
-    fig, axes = plt.subplots(2, len(compositions), figsize=(style.WIDTH_DOUBLE, 4.4), sharex=True, squeeze=False)
+    streams = summary.get("streams", [None])
+    fig, axes = plt.subplots(2 * len(streams), len(compositions), figsize=(style.WIDTH_DOUBLE, 4.4 * len(streams)),
+                             sharex=True, squeeze=False)
     x = np.arange(len(policies))
-    # top, the share of draws with an alarm, filled, and with a false alarm, hollow. bottom, the block of the alarm
-    # with its 5% to 95% range, and the first block whose population FOR exceeds epsilon
-    for col, co in enumerate(compositions):
-        g = claims[claims["composition"] == co["name"]]
-        for k, arm in enumerate(arms):
-            h = g[g["arm"] == arm].set_index("policy").reindex(policies)
-            xs = layout.dodge(x, k, len(arms), 0.14)
-            line = _arm_line(arm)
-            axes[0, col].plot(xs, h["alarm_rate"], linestyle="none", markersize=4, **line)
-            axes[0, col].plot(xs, h["false_alarm_rate"], linestyle="none", markersize=4, markerfacecolor="white",
+    # per stream two rows. top, the share of draws with an alarm, filled, and with a false alarm, hollow. bottom,
+    # the block of the alarm with its 5% to 95% range, and the first block whose population FOR exceeds epsilon
+    letters = iter(string.ascii_lowercase)
+    for si, stream in enumerate(streams):
+        data = of_stream(claims, stream) if stream is not None else claims
+        top, bottom = axes[2 * si], axes[2 * si + 1]
+        for col, co in enumerate(compositions):
+            g = data[data["composition"] == co["name"]]
+            for k, arm in enumerate(arms):
+                h = g[g["arm"] == arm].set_index("policy").reindex(policies)
+                xs = layout.dodge(x, k, len(arms), 0.14)
+                line = _arm_line(arm)
+                top[col].plot(xs, h["alarm_rate"], linestyle="none", markersize=4, **line)
+                top[col].plot(xs, h["false_alarm_rate"], linestyle="none", markersize=4, markerfacecolor="white",
                               color=line["color"], marker=line["marker"])
-            layout.points(axes[1, col], xs, h["alarm_block_median"], h["alarm_block_low"], h["alarm_block_high"],
-                          linestyle="none", **line)
-        h = g[g["arm"] == arms[0]].set_index("policy").reindex(policies)
-        axes[1, col].plot(x, h["onset_true_block_median"], linestyle="none", marker="_", markersize=9,
-                          color=style.INK, label="first block with FOR above epsilon")
-        axes[0, col].set_ylim(-0.02, 1.02)
-        axes[1, col].set_ylim(0, summary["source"]["windows"] + 1)
-        axes[1, col].set_xticks(x)
-        axes[1, col].set_xticklabels([POLICY_LABELS[p].split(",")[0] for p in policies], rotation=30, ha="right")
-        axes[1, col].set_xlabel(f"threshold policy, attack prevalence {style.percent(co['prevalence'])}")
-    axes[0, 0].set_ylabel("share of draws with an alarm")
-    axes[1, 0].set_ylabel("block of the alarm")
-    for ax, letter in zip(axes.flat, "abcdef"):
-        layout.panel_letter(ax, letter)
+                layout.points(bottom[col], xs, h["alarm_block_median"], h["alarm_block_low"], h["alarm_block_high"],
+                              linestyle="none", **line)
+            h = g[g["arm"] == arms[0]].set_index("policy").reindex(policies)
+            bottom[col].plot(x, h["onset_true_block_median"], linestyle="none", marker="_", markersize=9,
+                             color=style.INK, label="first block with FOR above epsilon")
+            top[col].set_ylim(-0.02, 1.02)
+            bottom[col].set_ylim(0, summary["source"]["windows"] + 1)
+            bottom[col].set_xticks(x)
+            bottom[col].set_xticklabels([POLICY_LABELS[p].split(",")[0] for p in policies], rotation=30, ha="right")
+        top[0].set_ylabel("share of draws with an alarm" + _stream_word(stream, streams))
+        bottom[0].set_ylabel("block of the alarm" + _stream_word(stream, streams))
+        for ax in [*top, *bottom]:
+            layout.panel_letter(ax, next(letters))
+    for ax, co in zip(axes[-1], compositions):
+        ax.set_xlabel(f"threshold policy, attack prevalence {style.percent(co['prevalence'])}")
     hollow = Line2D([], [], color=style.GRAY, marker="o", markerfacecolor="white", linestyle="none")
     layout.legend_below(fig, axes[0, 0], [ARM_LABELS[a] for a in arms], [(hollow, "false alarms")])
     return fig
@@ -795,28 +1043,33 @@ def fig_leakage_by_policy(run_dir) -> plt.Figure:
     policies = [p for p in POLICIES if p in summary["policies"]]
     arms = [a for a in [*MONITORS, "window_audit", "naive", "none"] if a in summary["arms"]]
     compositions = summary["compositions"]
-    fig, axes = plt.subplots(1, len(compositions), figsize=(style.WIDTH_DOUBLE, 2.8), sharey=True, squeeze=False)
-    axes = axes[0]
+    streams = summary.get("streams", [None])
+    fig, axes = plt.subplots(len(streams), len(compositions), figsize=(style.WIDTH_DOUBLE, 2.8 * len(streams)),
+                             sharex=True, sharey=True, squeeze=False)
     x = np.arange(len(policies))
-    # the attacks dismissed until the switch off per policy and arm, and the bound of Theorem 3 at the alarm of
-    # FORGE-Monitor
-    for ax, co, letter in zip(axes, compositions, "abcdef"):
-        g = claims[claims["composition"] == co["name"]]
-        for k, arm in enumerate(arms):
-            h = g[g["arm"] == arm].set_index("policy").reindex(policies)
-            xs = layout.dodge(x, k, len(arms), 0.13)
-            layout.points(ax, xs, h["leak_median"].clip(lower=1), h["leak_low"].clip(lower=1),
-                          h["leak_high"].clip(lower=1), linestyle="none", **_arm_line(arm))
-            if arm == "monitor":
-                ax.plot(xs, h["bound_median"].clip(lower=1), linestyle="none", marker="s", markersize=4,
-                        markerfacecolor="white", color=ARM_COLORS[arm], label="bound of Theorem 3")
-        ax.set_yscale("log")
-        ax.set_xticks(x)
-        ax.set_xticklabels([POLICY_LABELS[p].split(",")[0] for p in policies], rotation=30, ha="right")
+    # the attacks dismissed until the switch off per policy and arm, one row per stream, and the bound of Theorem 3
+    # at the alarm of FORGE-Monitor
+    letters = iter(string.ascii_lowercase)
+    for row, stream in zip(axes, streams):
+        data = of_stream(claims, stream) if stream is not None else claims
+        for ax, co in zip(row, compositions):
+            g = data[data["composition"] == co["name"]]
+            for k, arm in enumerate(arms):
+                h = g[g["arm"] == arm].set_index("policy").reindex(policies)
+                xs = layout.dodge(x, k, len(arms), 0.13)
+                layout.points(ax, xs, h["leak_median"].clip(lower=1), h["leak_low"].clip(lower=1),
+                              h["leak_high"].clip(lower=1), linestyle="none", **_arm_line(arm))
+                if arm == "monitor":
+                    ax.plot(xs, h["bound_median"].clip(lower=1), linestyle="none", marker="s", markersize=4,
+                            markerfacecolor="white", color=ARM_COLORS[arm], label="bound of Theorem 3")
+            ax.set_yscale("log")
+            ax.set_xticks(x)
+            ax.set_xticklabels([POLICY_LABELS[p].split(",")[0] for p in policies], rotation=30, ha="right")
+            layout.panel_letter(ax, next(letters))
+        row[0].set_ylabel("attacks dismissed until the switch off" + _stream_word(stream, streams))
+    for ax, co in zip(axes[-1], compositions):
         ax.set_xlabel(f"threshold policy, attack prevalence {style.percent(co['prevalence'])}")
-        layout.panel_letter(ax, letter)
-    axes[0].set_ylabel("attacks dismissed until the switch off")
-    layout.legend_below(fig, axes[0], [ARM_LABELS[a] for a in arms])
+    layout.legend_below(fig, axes[0, 0], [ARM_LABELS[a] for a in arms])
     return fig
 
 

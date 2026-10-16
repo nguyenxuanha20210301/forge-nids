@@ -4,7 +4,7 @@ import pytest
 
 from forge import experiments, runs
 from forge.config import load_config
-from forge.experiments.monitor_streams import audited_stream, judge_stream
+from forge.experiments.monitor_streams import STREAMS, audited_stream, judge_stream
 from forge.experiments.unseen_family import ARMS, MONITORS, e12_window_seed, unseen_metrics, units_of, window_size
 from forge.monitor.sequence import Sequence, Tables
 from forge.paths import configs_dir
@@ -103,9 +103,11 @@ def test_e23_on_an_e12_run(litnet_signal, tmp_path):
         ["SYN flood", "Smurf"]
     # the control reproduces the split, the offline thresholds and the real windows of the source run
     assert "offline thresholds of the source run reproduced" in log and summary["source_checked"]
-    assert len(claims) == 2 * 2 * 2 * len(policies) * len(arms)
-    assert len(blocks) == 2 * 2 * 2 * len(policies) * 6
+    assert summary["streams"] == STREAMS and summary["main_stream"] == "replay" and summary["chunk"] == 50
+    assert len(claims) == 2 * 2 * 2 * 2 * len(policies) * len(arms)
+    assert len(blocks) == 2 * 2 * 2 * 2 * len(policies) * 6
     assert set(claims["case"]) == {"unseen", "known"} and set(claims["arm"]) == set(arms)
+    assert set(claims["stream"]) == set(STREAMS) and set(blocks["stream"]) == set(STREAMS)
     assert units["unit"].tolist() == ["all_known", "syn_flood", "smurf"]
     # the held out family leaves the training, selection and calibration parts and keeps its test attacks
     families = summary["source"]["families"]
@@ -123,32 +125,46 @@ def test_e23_on_an_e12_run(litnet_signal, tmp_path):
     for u in summary["units"]:
         for case in ["unseen", "known"]:
             for co in ["typical", "worst"]:
-                for p in policies:
-                    key = f"{u['name']}|{case}|{co}|{p}|"
-                    attacks = draws[key + "attacks"]
-                    assert attacks.shape == (6, n_draws)
-                    assert (draws[key + "none_leak"] == attacks.sum(0)).all()
-                    assert (draws[key + "none_unseen_leak"] == attacks[u["window"]]).all()
-                    for arm in arms:
-                        pos = draws[key + f"{arm}_alarm_pos"]
-                        assert ((pos == -1) | (pos >= floor)).all()
-                        assert (draws[key + f"{arm}_leak"] <= attacks.sum(0)).all()
-                        assert (draws[key + f"{arm}_unseen_leak"] <= attacks[u["window"]]).all()
+                for stream in STREAMS:
+                    for p in policies:
+                        key = f"{u['name']}|{case}|{co}|{stream}|{p}|"
+                        attacks = draws[key + "attacks"]
+                        assert attacks.shape == (6, n_draws)
+                        assert (draws[key + "none_leak"] == attacks.sum(0)).all()
+                        assert (draws[key + "none_unseen_leak"] == attacks[u["window"]]).all()
+                        assert (key + "burst" in draws) == (stream == "replay")
+                        for arm in arms:
+                            pos = draws[key + f"{arm}_alarm_pos"]
+                            assert ((pos == -1) | (pos >= floor)).all()
+                            assert (draws[key + f"{arm}_leak"] <= attacks.sum(0)).all()
+                            assert (draws[key + f"{arm}_unseen_leak"] <= attacks[u["window"]]).all()
+                # the replay thins the test part to the same prevalence as the simulated window, so the attacks
+                # dismissed by the offline thresholds agree in expectation between the streams
+                for p in ["ltt_iid", "fixed_sel"]:
+                    sim = draws[f"{u['name']}|{case}|{co}|simulated|{p}|attacks"].mean(1)
+                    rep = draws[f"{u['name']}|{case}|{co}|replay|{p}|attacks"].mean(1)
+                    assert np.allclose(rep, sim, rtol=0.2, atol=3), (p, sim, rep)
     # the window of the family at the unseen prevalence, the known ones at theirs, with the sizes of the real windows
     # of e12
     claims12 = runs.load_table(run12.dir, "claims")
     real = claims12[(claims12["arm"] == "real") & (claims12["mix"] == "window")]
-    for row in blocks.drop_duplicates(["unit", "composition", "window"]).itertuples():
+    for row in blocks.drop_duplicates(["stream", "unit", "composition", "window"]).itertuples():
         unseen_pi = 0.2 if row.composition == "worst" else 0.05
         assert row.prevalence == (unseen_pi if row.unseen else 0.05)
         i = summary["source"]["segments"].index(row.segment)
         saved = real[(real["window"] == i) & (real["prevalence"] == row.prevalence)]["window_sessions"].unique()
         assert saved.tolist() == [row.window_sessions]
+    # the replay keeps every benign flow of a window that is not short of attacks, so its dismissed count is at least
+    # the benign count at the threshold, and a window short of attacks has its burst statistic as well
+    replayed = blocks[blocks["stream"] == "replay"]
+    assert (replayed["burst_max_median"] >= 0).all() and (replayed["burst_max_high"] >= replayed["burst_max_median"]).all()
+    assert blocks.loc[blocks["stream"] == "simulated", "burst_max_median"].isna().all()
+    assert replayed["benign_subsampled"].any()
     # the known case at the typical composition is one stream for every unit, so its rows agree up to the columns
     # that speak of the family's window
     typical = claims[(claims["case"] == "known") & (claims["composition"] == "typical")]
     shared = ["alarm_rate", "false_alarm_rate", "leak_median", "sessions_median", "audits_mean"]
-    for (p, arm), g in typical.groupby(["policy", "arm"]):
+    for (stream, p, arm), g in typical.groupby(["stream", "policy", "arm"]):
         assert len(g) == 2 and (g[shared].nunique() == 1).all()
     monitors = claims[claims["arm"].isin(MONITORS)]
     assert (monitors["miscover_rate"] <= 0.05 + 0.1).all()

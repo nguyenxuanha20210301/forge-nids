@@ -54,7 +54,8 @@ def reading(experiment: str, tables: dict) -> None:
         t = t[(t["case"] == "unseen") & (t["composition"] == "typical") & (t["policy"] == "forge_simplex")
               & (t["arm"].isin(["monitor", "monitor_any"]))]
         print("\nE6, the family unseen at the typical composition on the offline FORGE stream")
-        print(t[["unit", "arm"] + seeds._stats(t, ["alarm_in_unseen_rate", "unseen_leak_median", "unseen_miss_mean"])]
+        print(t[[c for c in ["stream", "unit", "arm"] if c in t]
+                + seeds._stats(t, ["alarm_in_unseen_rate", "unseen_leak_median", "unseen_miss_mean"])]
               .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
     if "e6_windows" in tables:
         print("\nE6, the family's window with the family unseen against known, at the offline FORGE thresholds")

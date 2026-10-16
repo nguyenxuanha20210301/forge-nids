@@ -30,6 +30,11 @@ compositions:
 # the threshold policies whose dismissed streams are monitored, as in e21
 policies: [forge_simplex, forge_online, ltt_iid, conformal_fnr, fixed_sel, recalibration]
 
+# the kinds of stream, as in e21. simulated draws every dismissed flow as an attack with the window's population FOR
+# independently, replay runs the test part of every window in its real order, thinned to the prevalence, and
+# dismisses its flows with their real labels. the paper reads the replay
+streams: [simulated, replay]
+
 monitor:
   # the certificate's epsilon, delta_lower of delta for the lower bound and the rest for the upper one
   epsilon: 0.001
@@ -52,3 +57,5 @@ simulation:
   # the draws are those of the source run, one stream per unit, case, composition and policy. the figure over the
   # stream shows the first draw of this unit, composition and policy with the family unseen
   trace: {unit: land, composition: typical, policy: forge_simplex}
+  # the replay thins the draws of a window this many at a time, which fixes the random stream of the thinning
+  chunk: 50

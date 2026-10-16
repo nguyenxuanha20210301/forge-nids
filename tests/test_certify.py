@@ -4,8 +4,9 @@ from scipy.stats import beta, binom, binomtest
 
 from forge.certify.bounds import clopper_pearson_lower, clopper_pearson_upper, dkw_margin
 from forge.certify.certificate import (certify, certify_online, certify_online_scores, certify_scores, conformal_fnr,
-                                       counts_below, family_groups, fixed_sequence, for_from_dismissed, for_from_rates,
-                                       group_rows, ltt_iid, min_family_size, online_certifier, plug_in)
+                                       counts_below, estimate_prevalence, estimated_certifier, family_groups,
+                                       fixed_sequence, for_from_dismissed, for_from_rates, group_rows, ks_threshold,
+                                       ltt_iid, min_family_size, online_certifier, plug_in)
 from forge.data.synthetic import benign_path, beta_cdfs, draw_counts, sample_flows
 
 BENIGN = (2, 8)
@@ -447,3 +448,81 @@ def test_ltt_start_tolerates_one_attack_among_the_first_dismissed_flows():
     assert out["index"] == 3 and out["bound"] == clopper_pearson_upper(4, 40004, 0.05)
     # a slack below the extra 0.001 dismissed keeps the start, and the refusal
     assert ltt_iid(benign, attack, 1e-3, 0.05, n=n, start_misses=2, start_slack=0.0005)["index"] == -1
+
+
+def test_estimate_prevalence_by_hand_and_at_its_edges():
+    # benign share 0.5, attack share 0.1 and window share 0.46 at the threshold give a prevalence of 0.1
+    out = estimate_prevalence(460, 1000, 500, 1000, 100, 1000, 0.01, 0.01, 0.005)
+    assert np.isclose(out["plugin"], 0.1) and out["upper"] > 0.1
+    b_up = 0.5 + dkw_margin(1000, 0.005)
+    m_up = clopper_pearson_upper(100, 1000, 0.005)
+    f_lo = 0.46 - dkw_margin(1000, 0.01)
+    assert np.isclose(out["upper"], (b_up - f_lo) / (b_up - m_up))
+    # a window share above the benign one gives 0, one below the attack share 1, and a benign share at or below
+    # the attack share tells nothing
+    out = estimate_prevalence(np.array([600, 0, 100]), 1000, 500, 1000, np.array([100, 100, 600]), 1000, 0.01,
+                              0.01, 0.005)
+    assert out["plugin"].tolist() == [0.0, 1.0, 1.0] and out["upper"].tolist()[1:] == [1.0, 1.0]
+    b, m = beta_cdfs(beta.ppf(np.arange(1, 201) / 201, *BENIGN), BENIGN, FAMILIES)
+    assert ks_threshold(b, np.array(SHARES) @ m) == int(np.argmax(b - np.array(SHARES) @ m))
+
+
+def test_estimated_certifier_is_the_pooled_certificate_at_the_given_prevalence():
+    grid = beta.ppf(np.arange(1, 201) / 201, *BENIGN)
+    b, m = beta_cdfs(grid, BENIGN, FAMILIES)
+    cal = draw_counts(np.random.default_rng(1), 3000000, 0.02, SHARES, b, m, 100)
+    pooled, n = cal.family_below.sum(1), cal.n_family.sum(1)
+    at = estimated_certifier(cal.benign_below, cal.n_benign, pooled, n, 1e-3, 0.01, 0.025)
+    mine = at(np.full(100, 0.1))
+    # the benign bound is the lower side of the two sided event at delta_benign, the family bound takes delta_miss
+    same = certify(cal.benign_below, cal.n_benign, pooled[:, None], n[:, None], 1e-3, 0.03, 0.1, delta_benign=0.005)
+    for key in ("index", "bound", "floor"):
+        assert np.allclose(mine[key], same[key], equal_nan=True)
+    assert (mine["index"] >= 0).all()
+    # a lower prevalence certifies a looser threshold, and the prevalence may differ per calibration set
+    lower = at(np.full(100, 0.01))["index"]
+    assert (lower >= mine["index"]).all() and (lower > mine["index"]).any()
+    mixed = at(np.where(np.arange(100) % 2 == 0, 0.01, 0.1))["index"]
+    assert np.array_equal(mixed[::2], lower[::2]) and np.array_equal(mixed[1::2], mine["index"][1::2])
+
+
+def test_upper_bound_on_the_prevalence_holds_under_label_shift_and_the_plug_in_does_not():
+    # windows at prevalence 0.01 from the calibration distributions. the upper bound covers the prevalence and its
+    # certificate keeps the violation share within delta while certifying far looser than pi_max, the plug in sits
+    # at the prevalence and its certificate violates in many draws, since it claims nothing
+    eps, draws, pi_w = 1e-3, 1500, 0.01
+    grid = beta.ppf(np.arange(1, 201) / 201, *BENIGN)
+    b, m = beta_cdfs(grid, BENIGN, FAMILIES)
+    cal = draw_counts(np.random.default_rng(2), 3000000, 0.02, SHARES, b, m, draws)
+    pooled, n = cal.family_below.sum(1), cal.n_family.sum(1)
+    t = ks_threshold(b, np.array(SHARES) @ m)
+    win = draw_counts(np.random.default_rng(3), 200000, pi_w, SHARES, b, m, draws)
+    below = win.benign_below + win.family_below.sum(1)
+    est = estimate_prevalence(below[:, t], 200000, cal.benign_below[:, t], cal.n_benign, pooled[:, t], n, 0.01,
+                              0.01, 0.005)
+    assert (est["upper"] >= est["plugin"]).all() and np.mean(est["upper"] < pi_w) <= 0.03
+    assert abs(np.median(est["plugin"]) - pi_w) < 0.002
+    at = estimated_certifier(cal.benign_below, cal.n_benign, pooled, n, eps, 0.01, 0.025)
+    rate = for_from_rates(pi_w, np.array(SHARES) @ m, b)
+    best = np.flatnonzero(rate <= eps)[-1]
+    upper = at(est["upper"])["index"]
+    plugin = at(est["plugin"])["index"]
+    worst = at(np.full(draws, 0.1))["index"]
+    violation_upper = np.mean(np.where(upper >= 0, rate[np.maximum(upper, 0)], 0) > eps)
+    violation_plugin = np.mean(np.where(plugin >= 0, rate[np.maximum(plugin, 0)], 0) > eps)
+    assert violation_upper <= 0.05 and violation_plugin >= violation_upper
+    assert np.median(worst) < np.median(upper) <= np.median(plugin) <= best
+    # a window whose attacks sit lower than the calibration mix at t is underestimated, since the estimate reads the
+    # miss rate of the calibration mix, so both certificates lose their cover where the mix moves while the
+    # certificate at pi_max keeps it
+    low_family = [(4, 3), (4, 3), (4, 3), (4, 3)]
+    _, m_low = beta_cdfs(grid, BENIGN, low_family)
+    moved = draw_counts(np.random.default_rng(4), 200000, pi_w, SHARES, b, m_low, draws)
+    below = moved.benign_below + moved.family_below.sum(1)
+    est = estimate_prevalence(below[:, t], 200000, cal.benign_below[:, t], cal.n_benign, pooled[:, t], n, 0.01,
+                              0.01, 0.005)
+    assert np.mean(est["plugin"] < pi_w) > 0.9
+    rate = for_from_rates(pi_w, np.array(SHARES) @ m_low, b)
+    for index in (at(est["plugin"])["index"], at(est["upper"])["index"]):
+        assert np.mean(np.where(index >= 0, rate[np.maximum(index, 0)], 0) > eps) > 0.9
+    assert np.mean(np.where(worst >= 0, rate[np.maximum(worst, 0)], 0) > eps) == 0

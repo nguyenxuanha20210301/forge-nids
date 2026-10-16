@@ -19,6 +19,12 @@ compositions:
   - {name: typical, prevalence: 0.02}
   - {name: worst, prevalence: 0.1}
 
+# the kinds of stream every policy and composition is monitored on. simulated draws every dismissed session as an
+# attack with the block's population FOR independently, replay keeps the sessions of the block in their real order
+# from the per session scores the source run saved, every attack row kept with the probability that gives the
+# prevalence, and dismisses them with their real labels. the paper reads the replay
+streams: [simulated, replay]
+
 # the threshold policies whose dismissed streams are monitored, the five of e11 and the recalibration of the fixed
 # threshold on the escalated labels after every block
 policies: [forge_simplex, forge_online, ltt_iid, conformal_fnr, fixed_sel, recalibration]
@@ -45,3 +51,5 @@ simulation:
   # the draws are those of the source run, one stream per policy and composition. the figure over the stream shows
   # the first draw of this policy and composition
   trace: {policy: forge_simplex, composition: typical}
+  # the replay thins the draws of a window this many at a time, which fixes the random stream of the thinning
+  chunk: 100
