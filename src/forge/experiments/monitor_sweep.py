@@ -115,7 +115,9 @@ def audited_stream(rng, dismissed, attack_share, benign_share, q_by_bin) -> dict
         weighted = attack_share[w] * q_by_bin[None, :]
         f, p = attack_share[w].sum(1), weighted.sum(1)
         live = (flows > 0) & (p > 0)
-        rest = np.where(live, (f - p) / (1 - p), f)
+        # the shares of a window are normalized, so when every dismissed session is an attack their sum can sit a
+        # few ulp past 1 and the ratio with it, the clip keeps the binomial probabilities inside the unit interval
+        rest = np.clip(np.where(live, (f - p) / (1 - p), f), 0.0, 1.0)
         if live.any():
             expected = (flows * p).max()
             m = int(np.ceil(expected + 10 * np.sqrt(expected) + 20))

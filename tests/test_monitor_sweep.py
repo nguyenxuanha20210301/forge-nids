@@ -69,6 +69,20 @@ def test_audited_stream_with_bins_follows_its_rates():
     assert abs(share_high - 0.08 * 0.3 / (0.02 * 0.05 + 0.08 * 0.3)) < 0.03
 
 
+def test_audited_stream_keeps_its_probabilities_in_the_unit_interval():
+    # a window whose dismissed sessions are all attacks, with normalized shares whose floating point sum sits one ulp
+    # past 1, as block 63 of the e11 run at seed 1 gave the ltt_iid stream of e22 at prevalence 0.1
+    rng = np.random.default_rng(3)
+    draws, q = 50, np.full(6, 0.005)
+    counts = np.array([0.0, 0.0, 0.0, 6386.0, 8813.0, 1644.0])
+    attack_share = np.broadcast_to(counts / counts.sum(), (1, draws, 6)).copy()
+    assert attack_share.sum(2).max() > 1.0
+    dismissed = np.full((1, draws), 5000)
+    s = audited_stream(rng, dismissed, attack_share, np.zeros((1, draws, 6)), q)
+    assert (s["attacks"] == dismissed).all() and (s["audited_benign"] == 0).all()
+    assert np.allclose(s["audited_attacks"].mean(), 5000 * 0.005, rtol=0.3)
+
+
 def test_monitor_cell_matches_e21_and_the_rules_hold_together():
     rng = np.random.default_rng(9)
     eps, delta, q, draws = 0.02, 0.05, 0.2, 300

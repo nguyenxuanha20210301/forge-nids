@@ -40,7 +40,9 @@ def save_figure(fig, folder, name: str, close: bool = True) -> list[Path]:
     a4 = folder / f"{name}_a4.pdf"
     fig.savefig(png, dpi=600)
     buf = BytesIO()
-    fig.savefig(buf, format="pdf")
+    # without the creation date a figure rebuilt from the same tables is the same file, so results/ only changes
+    # when a number does
+    fig.savefig(buf, format="pdf", metadata={"CreationDate": None})
     pdf.write_bytes(buf.getvalue())
     _a4_page(buf.getvalue(), a4)
     if close:
