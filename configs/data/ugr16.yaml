@@ -1,6 +1,16 @@
-# UGR16, ISP netflow with a calibration period and a test period
+# UGR'16, netflow of a Spanish ISP, the six test weeks of July and August 2016 with the attacks the authors launched,
+# from the Hugging Face mirror of the official weekly archives, since the official site returns 403
 dataset:
   name: ugr16
   raw_dir: ugr16
   processed_version: v1
-  window_freq: W
+  window_freq: 6h
+  # flows are ordered and assigned to windows by their end, the only time the archives hold
+  time_column: te
+  # the archives are fetched one at a time into local scratch space and deleted once their week is written, since
+  # 57 GB would not fit on Drive
+  raw_scratch: true
+  # every k-th flow of a week in file order is kept, so the order, the bursts and the label shares survive at a
+  # coarser grain. the test weeks hold about 3.7 billion flows and every 50th brings them to the scale of AnoShift
+  sample_every: 50
+  weeks: [july_week5, august_week1, august_week2, august_week3, august_week4, august_week5]
