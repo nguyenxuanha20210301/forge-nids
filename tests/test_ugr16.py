@@ -153,9 +153,73 @@ def test_prepare_keeps_every_kth_row_in_time_order(ugr16_mirror):
     assert list(flows["family"].cat.categories[:len(U.FAMILY_ORDER)]) == U.FAMILY_ORDER or \
         flows["family"].cat.categories[0] == "benign"
     assert U.fingerprint(flows) == manifest["fingerprint"]
+    # the weeks lie days apart, so the boundary merges nothing and the whole table is in te order
+    assert flows["te"].is_monotonic_increasing
+    kept = {w: [rows[i] for i in range(0, 40, 3)] for w, rows in m.truth.items()}
+    gap = max(r["te"] for r in kept["july_week5"]) - min(r["te"] for r in kept["august_week1"])
+    assert manifest["boundaries"] == [{"weeks": WEEKS, "overlap_seconds": gap.total_seconds(), "rows": [0, 0]}]
     assert (out / "readme.md").exists() and "anomaly-newkind" in (out / "readme.md").read_text()
     # the archives were deleted from the scratch space and no part is left
     assert not list(m.scratch.glob("*.tar.gz")) and not (out / "parts").exists()
+
+
+def shifted(week, seed, start):
+    # the rows of a week moved so that the week starts at the given time
+    rows = week_rows(week, seed, swap=False)
+    shift = rows[0]["te"] - start
+    for r in rows:
+        r["te"] = r["te"] - shift
+    return rows
+
+
+def test_prepare_merges_the_rows_of_overlapping_weeks(ugr16_mirror, tmp_path):
+    # the august week starts 15 s into the july week, as the archives overlap at every boundary by up to a minute
+    m = ugr16_mirror
+    july = week_rows("july_week5", 1, swap=False)
+    august = shifted("august_week1", 2, july[0]["te"] + timedelta(seconds=15))
+    files, truth = write_mirror(tmp_path / "mirror3", {"july_week5": july, "august_week1": august})
+    out = U.prepare(m.cfg, files=files, url=f"{(tmp_path / 'mirror3').as_uri()}/{{path}}", scratch=m.scratch,
+                    log=lambda s: None)
+    flows = U.load(m.cfg)
+    manifest = U.read_manifest(m.cfg)
+    kept = {w: [(pd.Timestamp(r["te"]), i + 1) for i, r in enumerate(rows) if i % 3 == 0] for w, rows in truth.items()}
+    expected = sorted((te, WEEKS.index(w), row_id) for w, rows in kept.items() for te, row_id in rows)
+    mine = list(zip(flows["te"].tolist(), flows["week"].astype(str).map(WEEKS.index).tolist(),
+                    flows["row_id"].tolist()))
+    assert mine == expected and flows["te"].is_monotonic_increasing
+    first_august = min(te for te, _ in kept["august_week1"])
+    last_july = max(te for te, _ in kept["july_week5"])
+    b = manifest["boundaries"][0]
+    assert b["weeks"] == WEEKS and b["overlap_seconds"] == (last_july - first_august).total_seconds() > 0
+    assert b["rows"] == [sum(te >= first_august for te, _ in kept["july_week5"]),
+                         sum(te <= last_july for te, _ in kept["august_week1"])] and min(b["rows"]) > 0
+    assert len(U.load(m.cfg, weeks=["august_week1"])) == 14 and manifest["rows"] == 28
+    assert U.fingerprint(flows) == manifest["fingerprint"]
+    readme = (out / "readme.md").read_text()
+    assert "## Boundaries" in readme and f"| july_week5 | august_week1 | {b['overlap_seconds']:.0f} |" in readme
+
+
+def test_prepare_rejects_weeks_out_of_te_order(ugr16_mirror, tmp_path):
+    m = ugr16_mirror
+    july = week_rows("july_week5", 1, swap=False)
+    august = shifted("august_week1", 2, july[0]["te"] - timedelta(days=1))
+    files, _ = write_mirror(tmp_path / "mirror4", {"july_week5": july, "august_week1": august})
+    with pytest.raises(ValueError, match="not in te order"):
+        U.prepare(m.cfg, files=files, url=f"{(tmp_path / 'mirror4').as_uri()}/{{path}}", scratch=m.scratch,
+                  log=lambda s: None)
+
+
+def test_prepare_rejects_a_week_that_overlaps_the_week_after_next(ugr16_mirror, tmp_path):
+    # three weeks a few seconds apart, so the first still runs when the third starts
+    m = ugr16_mirror
+    july = week_rows("july_week5", 1, swap=False)
+    weeks = {"july_week5": july, "august_week1": shifted("august_week1", 2, july[0]["te"] + timedelta(seconds=5)),
+             "august_week2": shifted("august_week1", 3, july[0]["te"] + timedelta(seconds=10))}
+    files, _ = write_mirror(tmp_path / "mirror5", weeks)
+    m.cfg["dataset"]["weeks"] = list(weeks)
+    with pytest.raises(ValueError, match="overlap in te although a week lies between them"):
+        U.prepare(m.cfg, files=files, url=f"{(tmp_path / 'mirror5').as_uri()}/{{path}}", scratch=m.scratch,
+                  log=lambda s: None)
 
 
 def test_load_filters_weeks(ugr16_mirror):

@@ -462,6 +462,44 @@ def _table(flows: pd.DataFrame) -> pa.Table:
     return pa.Table.from_pandas(flows, schema=SCHEMA, preserve_index=False)
 
 
+def _in_order(table: pa.Table, weeks: list[str]) -> pa.Table:
+    # the rows of one boundary, a few thousand, sorted by te, then by week in time order, then by row_id
+    frame = table.unify_dictionaries().to_pandas()
+    rank = frame["week"].astype(str).map(weeks.index).to_numpy()
+    order = np.lexsort((frame["row_id"].to_numpy(), rank, frame["te"].to_numpy()))
+    return _table(frame.iloc[order].reset_index(drop=True))
+
+
+def _write_in_order(writer: pq.ParquetWriter, parts: Path, summaries: list[dict], weeks: list[str]) -> list[dict]:
+    """writes the weeks as one table in te order, the rows of each boundary merged, and describes the boundaries.
+
+    an archive holds the flows exported in its week and the export trails the end of a flow by seconds, so the first
+    flows of a week end before the last flows of the week before it, by a minute at most. the rows of a boundary, the
+    tail of the earlier week from the first te of the later one and the head of the later week up to the last te of
+    the earlier one, are sorted together by te, week and row_id, and the rest of each week is written as it is, which
+    keeps every week in its own order and costs one week of memory at a time."""
+    boundaries, tail, before = [], None, None
+    for s, after in zip(summaries, summaries[1:] + [None]):
+        table = pq.read_table(parts / f"{s['week']}.parquet")
+        if before is not None:
+            last = pa.scalar(datetime.fromisoformat(before["last"]), pa.timestamp("ms"))
+            head = table.filter(pc.less_equal(table.column("te"), last))
+            table = table.filter(pc.greater(table.column("te"), last))
+            merged = pa.concat_tables([tail, head])
+            if merged.num_rows:
+                writer.write_table(_in_order(merged, weeks), row_group_size=ROW_GROUP_ROWS)
+            overlap = datetime.fromisoformat(before["last"]) - datetime.fromisoformat(s["first"])
+            boundaries.append({"weeks": [before["week"], s["week"]], "overlap_seconds": overlap.total_seconds(),
+                               "rows": [tail.num_rows, head.num_rows]})
+        if after is not None:
+            first = pa.scalar(datetime.fromisoformat(after["first"]), pa.timestamp("ms"))
+            tail = table.filter(pc.greater_equal(table.column("te"), first))
+            table = table.filter(pc.less(table.column("te"), first))
+        writer.write_table(table, row_group_size=ROW_GROUP_ROWS)
+        before = s
+    return boundaries
+
+
 def prepare(cfg: dict, log=print, files: dict | None = None, url: str = URL, scratch: Path | None = None) -> Path:
     files = FILES if files is None else files
     d = cfg["dataset"]
@@ -510,13 +548,18 @@ def prepare(cfg: dict, log=print, files: dict | None = None, url: str = URL, scr
         if delete:
             archive.unlink()
             log(f"deleted {archive.name}")
+    # the weeks overlap in te at their boundaries by a minute at most, see _write_in_order, which needs each week to
+    # start and end after the one before it and to stay clear of the week after next
     for a, b in zip(summaries, summaries[1:]):
-        if b["first"] < a["last"]:
-            raise ValueError(f"weeks {a['week']} and {b['week']} overlap in te, so the table cannot be written week "
-                             "after week")
+        if not (a["first"] < b["first"] and a["last"] < b["last"]):
+            raise ValueError(f"weeks {a['week']} and {b['week']} are not in te order, {a['first']} to {a['last']} "
+                             f"against {b['first']} to {b['last']}")
+    for a, c in zip(summaries, summaries[2:]):
+        if not a["last"] < c["first"]:
+            raise ValueError(f"weeks {a['week']} and {c['week']} overlap in te although a week lies between them, so "
+                             "the boundaries cannot be merged one at a time")
     with pq.ParquetWriter(partial / "flows.parquet", SCHEMA, compression="zstd") as writer:
-        for s in summaries:
-            writer.write_table(pq.read_table(parts / f"{s['week']}.parquet"), row_group_size=ROW_GROUP_ROWS)
+        boundaries = _write_in_order(writer, parts, summaries, weeks)
 
     manifest = {
         "dataset": d["name"],
@@ -542,6 +585,7 @@ def prepare(cfg: dict, log=print, files: dict | None = None, url: str = URL, scr
         "columns": {f.name: str(f.type) for f in SCHEMA},
         "dropped": {"identifier_columns": list(IDENTIFIER_COLUMNS), "rows": sum(s["dropped"] for s in summaries)},
         "weeks": summaries,
+        "boundaries": boundaries,
         "fingerprint": digest.combine((s["week"], s["fingerprint"]) for s in summaries),
     }
     (partial / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -558,8 +602,8 @@ def read_manifest(cfg: dict) -> dict:
 
 
 def load(cfg: dict, columns: list[str] | None = None, weeks: list[str] | None = None) -> pd.DataFrame:
-    # the processed table in the order it was written, by week and then by flow end, only the given weeks when weeks
-    # is set. the known families come first in the category order, any other label after them
+    # the processed table in the order it was written, by flow end with ties by week and then by row_id, only the
+    # given weeks when weeks is set. the known families come first in the category order, any other label after them
     filters = None if weeks is None else [("week", "in", list(weeks))]
     flows = pq.read_table(processed_dir(cfg) / "flows.parquet", columns=columns, filters=filters).to_pandas()
     if "family" in flows.columns:
@@ -573,8 +617,10 @@ def load(cfg: dict, columns: list[str] | None = None, weeks: list[str] | None = 
 
 
 def fingerprint(flows: pd.DataFrame) -> str:
-    # recomputes the fingerprint of a full table read back with load, one digest per week block in row order
-    return digest.fingerprint(flows, "week", SCHEMA)
+    # recomputes the fingerprint of a full table read back with load, one digest per week over its rows in table order,
+    # since the weeks interleave at their boundaries and form no blocks
+    weeks = [w for w in flows["week"].cat.categories if (flows["week"] == w).any()]
+    return digest.combine((w, digest.table_digest(flows[flows["week"] == w], SCHEMA)) for w in weeks)
 
 
 def readme(m: dict) -> str:
@@ -590,8 +636,8 @@ def readme(m: dict) -> str:
         "",
         f"`flows.parquet` holds {m['rows']} flows, {m['attacks']} of them attacks, anomalies or blacklisted "
         f"addresses, every {k}th flow in file order of the {m['rows_in_weeks']} flows of {len(m['weeks'])} test "
-        f"{'week' if len(m['weeks']) == 1 else 'weeks'}, sorted by `week` and `te`. `manifest.json` holds the same "
-        "facts in machine readable form.",
+        f"{'week' if len(m['weeks']) == 1 else 'weeks'}, sorted by `te` with ties by `week` and `row_id`. "
+        "`manifest.json` holds the same facts in machine readable form.",
         "",
         "## Source",
         "",
@@ -624,8 +670,10 @@ def readme(m: dict) -> str:
         "label outside the known list is kept under its own name and reported.",
         "4. `tcp_flags` is the bitmask of the six flag letters UAPRSF with dots for unset bits, or `0x` and two hex "
         "digits when a bit above 0x3f is set.",
-        "5. Rows are sorted by `te`, then by `row_id`, the position in the week, which the archives already "
-        "satisfy. Weeks do not overlap in `te`, which was checked.",
+        "5. Rows are sorted by `te`, then by `week`, then by `row_id`, the position in the week, which the archives "
+        "already satisfy within a week. An archive holds the flows exported in its week and the export trails the "
+        "end of a flow by seconds, so the first flows of a week end before the last flows of the week before it, by "
+        "a minute at most, and the rows of each boundary are merged in `te` order, see Boundaries.",
         "6. Apart from the sampling, no row is filtered, deduplicated or changed.",
         "",
         "## Columns",
@@ -664,6 +712,21 @@ def readme(m: dict) -> str:
     if examples:
         lines += ["", f"Dropped flows, the first {EXAMPLES} of each week by line, field and text:", ""]
         lines += [f"- {week}, line {e['row_id']}, {e['column']} `{e['value']}`" for week, e in examples]
+    if m.get("boundaries"):
+        lines += [
+            "",
+            "## Boundaries",
+            "",
+            "The overlap in `te` between each week and the one before it, in seconds, with the rows merged at the "
+            "boundary, those of the earlier week from the first `te` of the later one and those of the later week up "
+            "to the last `te` of the earlier one. A negative overlap is a gap.",
+            "",
+            "| earlier week | later week | overlap in seconds | rows of the earlier week | rows of the later week |",
+            "|---|---|---|---|---|",
+        ]
+        for b in m["boundaries"]:
+            lines.append(f"| {b['weeks'][0]} | {b['weeks'][1]} | {b['overlap_seconds']:.0f} | {b['rows'][0]} | "
+                         f"{b['rows'][1]} |")
     lines += [
         "",
         "## Families",
