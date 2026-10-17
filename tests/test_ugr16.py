@@ -19,10 +19,21 @@ STARTS = {"july_week5": datetime(2016, 7, 27, 0, 0, 0), "august_week1": datetime
 
 
 def line(te, label="background", td=0.0, sp=40000, dp=80, pr="TCP", flg="....S.", fwd=0, stos=0, ipkt=1, ibyt=52):
-    # 13 fields as in the published csv files, addresses included
-    fields = [f"{te:%Y-%m-%d %H:%M:%S}", f"{td:.3f}", "10.0.0.1", "42.219.153.62", sp, dp, pr, flg, fwd, stos, ipkt,
-              ibyt, label]
+    # 13 fields as in the published csv files, addresses included. a string stands as it is, so a line can carry a
+    # value the archives should not hold
+    fields = [f"{te:%Y-%m-%d %H:%M:%S}", td if isinstance(td, str) else f"{td:.3f}", "10.0.0.1", "42.219.153.62", sp,
+              dp, pr, flg, fwd, stos, ipkt, ibyt, label]
     return ",".join(str(f) for f in fields)
+
+
+def archive(target, lines):
+    # one csv member of the given lines, written as bytes so that a line can hold anything
+    data = b"\n".join(lines) + b"\n"
+    with tarfile.open(target, "w:gz") as tar:
+        info = tarfile.TarInfo("uniq/august.week1.csv.uniqblacklistremoved")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return target
 
 
 def week_rows(week, seed, swap):
@@ -129,6 +140,8 @@ def test_prepare_keeps_every_kth_row_in_time_order(ugr16_mirror):
         assert s["labels_in_week"] == {U.family_name(k): v for k, v in
                                        pd.Series([r["label"] for r in rows]).value_counts().items()}
         assert s["unknown_labels"] == ["anomaly-newkind"]
+        assert s["dropped"] == 0 and s["dropped_examples"] == []
+    assert manifest["dropped"]["rows"] == 0
     assert next(w for w in manifest["weeks"] if w["week"] == "july_week5")["in_order"]
     assert not next(w for w in manifest["weeks"] if w["week"] == "august_week1")["in_order"]
     # ties keep the file order, and the swapped pair is sorted back
@@ -211,6 +224,66 @@ def test_download_fetches_nothing_in_scratch_mode_and_the_archives_otherwise(ugr
     # the second call finds the checked copies
     U.download(cfg, files=m.files, url=m.url, log=messages.append)
     assert sum(s.startswith("found ") for s in messages) == 2
+
+
+def test_read_week_drops_the_rows_with_a_value_it_cannot_read(tmp_path):
+    # a thousand good lines, then a port that runs into the time of the next line as the archives have it, a port out
+    # of range, an hour out of range, a duration that is not a number, a byte outside utf-8 in a port, and one in a
+    # label, which is a value the reader can keep under its own name
+    start = datetime(2016, 8, 1)
+    good = [line(start + timedelta(seconds=i)).encode() for i in range(1000)]
+    t = start + timedelta(seconds=1000)
+    bad = [line(t, dp="56572016-08-03 15:14:34").encode(), line(t, sp=70000).encode(),
+           b"2016-08-01 25:00:00" + line(t).encode()[19:], line(t, td="abc").encode(),
+           line(t, dp="8X0").encode().replace(b"8X0", b"8\xff0"),
+           line(t, label="backgrXund").encode().replace(b"backgrXund", b"backgr\xffund")]
+    target = archive(tmp_path / "week.tar.gz", good + bad)
+    messages = []
+    flows, s = U.read_week(target, "august_week1", WEEKS, 1, log=messages.append)
+    assert s["lines"] == 1006 and s["skipped_lines"] == 0 and s["flows_in_week"] == 1006
+    assert s["dropped"] == 5 and s["flows"] == 1001 and len(flows) == 1001
+    assert [(e["row_id"], e["column"]) for e in s["dropped_examples"]] == \
+        [(1001, "dp"), (1002, "sp"), (1003, "te"), (1004, "td"), (1005, "dp")]
+    assert [e["value"] for e in s["dropped_examples"]] == \
+        ["56572016-08-03 15:14:34", "70000", "2016-08-01 25:00:00", "abc", "8\ufffd0"]
+    assert not set(range(1001, 1006)) & set(flows["row_id"]) and 1006 in set(flows["row_id"])
+    # the line with the odd byte in its label counts under that label, kept with the replacement character
+    assert s["labels_in_week"] == {"benign": 1005, "backgr\ufffdund": 1} and s["unknown_labels"] == ["backgr\ufffdund"]
+    assert s["attacks"] == 1
+    assert flows.loc[flows["row_id"] == 1006, "family"].astype(str).tolist() == ["backgr\ufffdund"]
+    assert flows["dp"].tolist()[:1000] == [80] * 1000 and flows["te"].is_monotonic_increasing
+    assert "5 kept rows dropped" in messages[-1] and "line 1001 dp" in messages[-1]
+
+
+def test_read_week_rejects_a_week_it_cannot_read(tmp_path):
+    # every port out of range means the fields are not what the columns say, not a few cut lines
+    start = datetime(2016, 8, 1)
+    lines = [line(start + timedelta(seconds=i), sp=70000).encode() for i in range(20)]
+    target = archive(tmp_path / "week.tar.gz", lines)
+    with pytest.raises(ValueError, match="cannot be read"):
+        U.read_week(target, "august_week1", WEEKS, 1, log=lambda s: None)
+
+
+def test_prepare_records_the_dropped_flows(ugr16_mirror, tmp_path, monkeypatch):
+    # one cut line at a kept position of the august week, with the share a small fixture needs
+    m = ugr16_mirror
+    monkeypatch.setattr(U, "MAX_DROPPED", 0.5)
+    august = week_rows("august_week1", 2, swap=True)
+    august[3]["dp"] = "56572016-08-03 15:14:34"
+    files, _ = write_mirror(tmp_path / "mirror2", {"july_week5": week_rows("july_week5", 1, swap=False),
+                                                     "august_week1": august})
+    out = U.prepare(m.cfg, files=files, url=f"{(tmp_path / 'mirror2').as_uri()}/{{path}}", scratch=m.scratch,
+                    log=lambda s: None)
+    manifest = U.read_manifest(m.cfg)
+    s = next(w for w in manifest["weeks"] if w["week"] == "august_week1")
+    assert s["dropped"] == 1 and s["flows"] == 13 and s["flows_in_week"] == 40
+    assert s["dropped_examples"] == [{"row_id": 4, "column": "dp", "value": "56572016-08-03 15:14:34"}]
+    assert manifest["rows"] == 27 and manifest["dropped"]["rows"] == 1
+    flows = U.load(m.cfg)
+    assert 4 not in set(flows.loc[flows["week"] == "august_week1", "row_id"])
+    assert (flows["week"] == "july_week5").sum() == 14
+    readme = (out / "readme.md").read_text()
+    assert "- august_week1, line 4, dp `56572016-08-03 15:14:34`" in readme and "| no | 1 | 1 | scan11" in readme
 
 
 def test_read_week_rejects_a_second_member(tmp_path):

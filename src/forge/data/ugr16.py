@@ -17,9 +17,11 @@ size and the sha256 of each. no checksum was ever published on the official site
 mirror's, and the archive of the last test week was checked on 2026-10-17 against the official file name, its owner
 and its layout. the test weeks hold about 3.7 billion flows, fifty times the sessions of AnoShift, so prepare keeps
 every k-th flow of a week in file order, the systematic sample that keeps the order, the bursts and the label shares at
-a coarser grain, and records the full count of every label beside the sampled ones. the archives are fetched one at a
-time into scratch space and deleted once their week is written, since 57 GB would not fit on Drive, and a week already
-written is kept across interrupted runs. download fetches nothing in that mode and the raw archives otherwise.
+a coarser grain, and records the full count of every label beside the sampled ones. a few lines of the archives were
+cut and run into the line after them, so every field is read as text and the kept rows are cast afterwards, a row
+holding a value that cannot be read dropped and counted. the archives are fetched one at a time into scratch space and
+deleted once their week is written, since 57 GB would not fit on Drive, and a week already written is kept across
+interrupted runs. download fetches nothing in that mode and the raw archives otherwise.
 """
 
 import hashlib
@@ -79,7 +81,9 @@ RAW_COLUMNS = ["te", "td", "sa", "da", "sp", "dp", "pr", "flg", "fwd", "stos", "
 IDENTIFIER_COLUMNS = ("sa", "da")
 READ_COLUMNS = [c for c in RAW_COLUMNS if c not in IDENTIFIER_COLUMNS]
 # the end time arrives as 2016-08-29 00:12:21 and the ports as whole numbers for every protocol, ICMP included, which
-# the last test week showed on every row
+# the last test week showed on every row. every field is read as text and the kept rows are cast to these types in
+# _cast, since the archives hold a few cut lines that run into the line after them and the csv reader would stop the
+# week on the first value it cannot convert
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 RAW_TYPES = {
     "te": pa.timestamp("s"),
@@ -94,6 +98,17 @@ RAW_TYPES = {
     "ibyt": pa.int64(),
     "label": pa.string(),
 }
+# the range of each integer field, a port, a byte or a count, so a cut line that pushed a port into the millions is
+# dropped rather than narrowed, and the digits an integer may have, so no cast can overflow int64
+RANGES = {"sp": (0, 65535), "dp": (0, 65535), "fwd": (0, 255), "stos": (0, 255), "ipkt": (0, None), "ibyt": (0, None)}
+MAX_DIGITS = 18
+# a duration as nfdump writes it, seconds with three decimals
+DURATION = r"^[0-9]{1,12}(\.[0-9]{1,6})?$"
+# the share of the sampled rows of a week that may be dropped for a value that cannot be read. the cut lines are a few
+# in a hundred million, so more than one in a hundred means the fields are not what the columns say
+MAX_DROPPED = 0.01
+# dropped rows recorded in the summary of a week with their line, the field that failed and its text
+EXAMPLES = 5
 
 # the labels the authors give and the family name used here. a label outside this list is kept under its own name,
 # lower case with underscores, and reported, since the weeks are read once and a stop would cost the week
@@ -261,17 +276,22 @@ def _fit(values, dtype, name: str) -> np.ndarray:
     return values.astype(dtype)
 
 
+def _strings(values: pa.Array) -> list[str]:
+    # the lines are taken as they are, so a byte outside utf-8 is replaced here rather than stopping the week
+    return [b.decode("utf-8", "replace") for b in values.cast(pa.binary()).to_pylist()]
+
+
 def _parsed_dictionary(column: pa.ChunkedArray, parse, dtype) -> np.ndarray:
     # a few hundred distinct strings at most, so each is parsed once and spread over its rows
     encoded = column.combine_chunks().dictionary_encode()
-    values = np.array([parse(t) for t in encoded.dictionary.to_pylist()], dtype=dtype)
+    values = np.array([parse(t) for t in _strings(encoded.dictionary)], dtype=dtype)
     return values[encoded.indices.to_numpy(zero_copy_only=False)]
 
 
 def _categorical(column: pa.ChunkedArray, rename=lambda name: name, first: list[str] = ()) -> pd.Categorical:
     # the distinct strings of the column as categories, the ones listed in first in that order and the rest sorted
     encoded = column.combine_chunks().dictionary_encode()
-    names = [rename(t) for t in encoded.dictionary.to_pylist()]
+    names = [rename(t) for t in _strings(encoded.dictionary)]
     order = [n for n in first if n in names] + sorted(set(names) - set(first))
     remap = np.array([order.index(n) for n in names], dtype=np.int16)
     codes = remap[encoded.indices.to_numpy(zero_copy_only=False)] if len(names) else np.array([], dtype=np.int16)
@@ -300,6 +320,42 @@ def clean(raw: pa.Table, week: str, weeks: list[str], row_id: np.ndarray) -> pd.
     })
 
 
+def _cast(raw: pa.RecordBatch, row_id: np.ndarray, limit: int) -> tuple[pa.Table, np.ndarray, int, list[dict]]:
+    """the kept rows cast from text to their raw types, without the rows holding a value that cannot be read.
+
+    a cut line of the archives runs into the line after it, so a port can read as a port followed by a timestamp.
+    every field arrives as text and is checked before its cast, a time by parsing it, a count by its digits, its
+    length and its range, a duration by its shape, and a row that fails any check is dropped. the dropped rows come
+    back as a count and, up to the limit and in line order, as their line, the first field that failed and its text."""
+    columns, ok, found = {}, np.ones(raw.num_rows, dtype=bool), []
+    for name in READ_COLUMNS:
+        text, dtype = raw.column(name), RAW_TYPES[name]
+        if dtype == pa.string():
+            columns[name] = text
+            continue
+        text = pc.ascii_trim_whitespace(text)
+        if name == "te":
+            values = pc.strptime(text, format=TIME_FORMAT, unit="s", error_is_null=True)
+            good = values.is_valid()
+        elif name == "td":
+            good = pc.match_substring_regex(text, DURATION)
+            values = pc.cast(pc.if_else(good, text, pa.scalar(None, pa.string())), dtype)
+        else:
+            low, high = RANGES[name]
+            good = pc.and_(pc.ascii_is_decimal(text), pc.less_equal(pc.binary_length(text), MAX_DIGITS))
+            values = pc.cast(pc.if_else(good, text, pa.scalar(None, pa.string())), dtype)
+            good = pc.greater_equal(values, low) if high is None else pc.and_(pc.greater_equal(values, low),
+                                                                              pc.less_equal(values, high))
+        good = pc.fill_null(good, False).to_numpy(zero_copy_only=False)
+        # the earliest failures of each field, among the rows no earlier field failed, hold the earliest of the row
+        failed = np.flatnonzero(ok & ~good)[:max(limit, 0)]
+        found += [(int(i), name, v) for i, v in zip(failed, _strings(text.take(pa.array(failed))))]
+        ok &= good
+        columns[name] = values
+    examples = [{"row_id": int(row_id[i]), "column": name, "value": v} for i, name, v in sorted(found)[:limit]]
+    return pa.table(columns).filter(pa.array(ok)), row_id[ok], int((~ok).sum()), examples
+
+
 def _member(tar: tarfile.TarFile) -> tarfile.TarInfo:
     # the archive is read as a stream, so the first regular file is taken and must be the only one
     member = next((m for m in tar if m.isfile()), None)
@@ -311,10 +367,11 @@ def _member(tar: tarfile.TarFile) -> tarfile.TarInfo:
 def read_week(path: Path, week: str, weeks: list[str], every: int, log=print) -> tuple[pd.DataFrame, dict]:
     """every k-th flow of one archive in file order with the counts of all its lines.
 
-    the csv is streamed through the arrow reader in blocks and only the kept rows of each block are parsed further,
-    so the cost of a week is its decompression and the label counts. lines with another number of fields are skipped
-    and counted, empty lines are ignored, and the flows are sorted by their end time with ties in file order, which
-    the archives already satisfy."""
+    the csv is streamed through the arrow reader in blocks with every field as text, and only the kept rows of each
+    block are checked and cast, so the cost of a week is its decompression and the label counts. lines with another
+    number of fields are skipped and counted, empty lines are ignored, a kept row holding a value that cannot be read
+    is dropped and counted, and the flows are sorted by their end time with ties in file order, which the archives
+    already satisfy."""
     skipped = {"n": 0}
 
     def skip(row):
@@ -323,22 +380,29 @@ def read_week(path: Path, week: str, weeks: list[str], every: int, log=print) ->
 
     read = pcsv.ReadOptions(column_names=RAW_COLUMNS, block_size=CSV_BLOCK)
     parse = pcsv.ParseOptions(invalid_row_handler=skip)
-    convert = pcsv.ConvertOptions(column_types=RAW_TYPES, include_columns=READ_COLUMNS, timestamp_parsers=[TIME_FORMAT])
-    kept, row_ids, counts, rows = [], [], {}, 0
+    # a byte outside utf-8 is left in place, since a check would stop the week and the text is cast or decoded later
+    convert = pcsv.ConvertOptions(column_types={c: pa.string() for c in RAW_COLUMNS}, include_columns=READ_COLUMNS,
+                                  check_utf8=False)
+    kept, row_ids, counts, rows, dropped, examples = [], [], {}, 0, 0, []
     with tarfile.open(path, "r|gz") as tar:
         member = _member(tar)
         with tar.extractfile(member) as f, pcsv.open_csv(f, read_options=read, parse_options=parse,
                                                           convert_options=convert) as reader:
             for batch in reader:
                 n = batch.num_rows
-                for value, count in zip(*pc.value_counts(batch.column("label")).flatten()):
-                    counts[value.as_py()] = counts.get(value.as_py(), 0) + count.as_py()
+                seen = pc.value_counts(batch.column("label"))
+                for value, count in zip(_strings(seen.field(0)), seen.field(1).to_pylist()):
+                    counts[value] = counts.get(value, 0) + count
                 # rows are numbered from 1 over the whole week, and row 1, 1 + k, 1 + 2k and on are kept
                 first = (-rows) % every
                 indices = np.arange(first, n, every)
                 if len(indices):
-                    kept.append(batch.take(pa.array(indices)))
-                    row_ids.append(rows + indices + 1)
+                    table, ids, bad, found = _cast(batch.take(pa.array(indices)), rows + indices + 1,
+                                                   EXAMPLES - len(examples))
+                    kept.append(table)
+                    row_ids.append(ids)
+                    dropped += bad
+                    examples += found
                 rows += n
         # the stream stands after the csv, and next reads the headers that follow, since iterating the archive again
         # would start from the members already seen
@@ -350,11 +414,15 @@ def read_week(path: Path, week: str, weeks: list[str], every: int, log=print) ->
         raise ValueError(f"{path.name} holds {', '.join(extra)} beside {member.name}, one csv was expected")
     if rows == 0:
         raise ValueError(f"{path.name} holds no flow")
+    sampled = sum(t.num_rows for t in kept) + dropped
+    if dropped > MAX_DROPPED * sampled:
+        e = examples[0]
+        raise ValueError(f"{path.name} holds {dropped} sampled rows of {sampled} with a value that cannot be read, "
+                         f"far more than its few cut lines, e.g. line {e['row_id']} {e['column']} {e['value']!r}")
     in_week = {}
     for value, count in counts.items():
         in_week[family_name(value)] = in_week.get(family_name(value), 0) + int(count)
-    table = pa.Table.from_batches(kept, schema=kept[0].schema) if kept else pa.table(
-        {c: pa.array([], RAW_TYPES[c]) for c in READ_COLUMNS})
+    table = pa.concat_tables(kept) if kept else pa.table({c: pa.array([], RAW_TYPES[c]) for c in READ_COLUMNS})
     flows = clean(table, week, weeks, np.concatenate(row_ids) if row_ids else np.array([], dtype=np.int64))
     in_order = bool(flows["te"].is_monotonic_increasing)
     # ties in time keep the order of the source file, which row_id records
@@ -372,6 +440,8 @@ def read_week(path: Path, week: str, weeks: list[str], every: int, log=print) ->
         "labels_in_week": dict(sorted(in_week.items())),
         "every": int(every),
         "flows": int(len(flows)),
+        "dropped": int(dropped),
+        "dropped_examples": examples,
         "attacks": int(attacks.sum()),
         "in_order": in_order,
         "first": str(flows["te"].iloc[0]),
@@ -382,6 +452,8 @@ def read_week(path: Path, week: str, weeks: list[str], every: int, log=print) ->
     }
     log(f"read {path.name}, {rows} flows in the week, {len(flows)} kept, {summary['attacks']} attacks, te from "
         f"{summary['first']} to {summary['last']}" + (f", {skipped['n']} lines skipped" if skipped["n"] else "")
+        + (f", {dropped} kept rows dropped for a value that cannot be read, e.g. line {examples[0]['row_id']} "
+           f"{examples[0]['column']} {examples[0]['value']!r}" if dropped else "")
         + (f", unknown labels {', '.join(summary['unknown_labels'])}" if summary["unknown_labels"] else ""))
     return flows, summary
 
@@ -417,6 +489,10 @@ def prepare(cfg: dict, log=print, files: dict | None = None, url: str = URL, scr
         if part.exists() and meta.exists():
             s = json.loads(meta.read_text(encoding="utf-8"))
             if s.get("sha256") == sha256 and s.get("every") == every:
+                # a part written before the fields were read as text has no dropped count, and that reader stopped
+                # on any value it could not cast, so its count is 0
+                s.setdefault("dropped", 0)
+                s.setdefault("dropped_examples", [])
                 log(f"found {week} in {parts}, {s['flows']} flows kept of {s['flows_in_week']}")
                 summaries.append(s)
                 continue
@@ -464,7 +540,7 @@ def prepare(cfg: dict, log=print, files: dict | None = None, url: str = URL, scr
         "attacks": sum(s["attacks"] for s in summaries),
         "rows_in_weeks": sum(s["flows_in_week"] for s in summaries),
         "columns": {f.name: str(f.type) for f in SCHEMA},
-        "dropped": {"identifier_columns": list(IDENTIFIER_COLUMNS)},
+        "dropped": {"identifier_columns": list(IDENTIFIER_COLUMNS), "rows": sum(s["dropped"] for s in summaries)},
         "weeks": summaries,
         "fingerprint": digest.combine((s["week"], s["fingerprint"]) for s in summaries),
     }
@@ -541,8 +617,9 @@ def readme(m: dict) -> str:
         "authors' description. The addresses are not read.",
         f"2. The flows are numbered from 1 in file order and every {k}th one is kept, counting from the first, so "
         "the order, the bursts and the label shares survive at a coarser grain. Lines with another number of fields "
-        "are skipped and counted, empty lines ignored. The label counts of every line of the week are recorded "
-        "beside the counts of the kept flows.",
+        "are skipped and counted, empty lines ignored. A kept flow holding a value that cannot be read, which the "
+        "archives have where a line was cut and runs into the next, is dropped and counted with its line, field and "
+        "text. The label counts of every line of the week are recorded beside the counts of the kept flows.",
         "3. `label` is 1 for every flow not labelled background and `family` maps the authors' label, see Families. A "
         "label outside the known list is kept under its own name and reported.",
         "4. `tcp_flags` is the bitmask of the six flag letters UAPRSF with dots for unset bits, or `0x` and two hex "
@@ -563,23 +640,30 @@ def readme(m: dict) -> str:
     lines += [
         "",
         f"Dropped: {', '.join(f'`{c}`' for c in m['dropped']['identifier_columns'])}, the source and destination "
-        "addresses, which identify hosts and carry the labels of the attacks and of the blacklist.",
+        "addresses, which identify hosts and carry the labels of the attacks and of the blacklist"
+        + (f", and {m['dropped']['rows']} kept flows with a value that cannot be read, listed under Weeks."
+           if m["dropped"].get("rows") else "."),
         "",
         "## Weeks",
         "",
-        "In `te` order. Flows and labels of the week count every line of the archive, the kept columns the sample. "
-        "The fingerprint column is the start of each week's digest, see Fingerprint.",
+        "In `te` order. Flows and labels of the week count every line of the archive, the kept columns the sample "
+        "without the dropped flows, which held a value that could not be read. The fingerprint column is the start "
+        "of each week's digest, see Fingerprint.",
         "",
         "| week | file | flows of the week | kept | attacks kept | prevalence | first `te` | last `te` | in file "
-        "order | skipped lines | families kept | fingerprint |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "order | skipped lines | dropped | families kept | fingerprint |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for w in m["weeks"]:
         families = ", ".join(f"{k} {v}" for k, v in w["families"].items()) or "none"
         lines.append(f"| {w['week']} | {w['file']} | {w['flows_in_week']} | {w['flows']} | {w['attacks']} | "
                      f"{w['attacks'] / max(w['flows'], 1):.6f} | {w['first']} | {w['last']} | "
-                     f"{'yes' if w['in_order'] else 'no'} | {w['skipped_lines']} | {families} | "
-                     f"`{w['fingerprint'][:12]}` |")
+                     f"{'yes' if w['in_order'] else 'no'} | {w['skipped_lines']} | {w.get('dropped', 0)} | "
+                     f"{families} | `{w['fingerprint'][:12]}` |")
+    examples = [(w["week"], e) for w in m["weeks"] for e in w.get("dropped_examples", [])]
+    if examples:
+        lines += ["", f"Dropped flows, the first {EXAMPLES} of each week by line, field and text:", ""]
+        lines += [f"- {week}, line {e['row_id']}, {e['column']} `{e['value']}`" for week, e in examples]
     lines += [
         "",
         "## Families",
