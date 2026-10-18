@@ -53,3 +53,24 @@ def test_order_blocks_split_each_group_into_equal_runs():
         order_blocks(np.array([1, 1, 2, 1]), 2)
     with pytest.raises(ValueError):
         order_blocks(groups, 0)
+
+
+def test_fixed_windows_start_at_the_same_clock_times_every_day():
+    from forge.data.splits import fixed_window_table, fixed_windows
+
+    t = stamps("2016-07-27 13:43:21", "2016-07-27 17:59:59", "2016-07-27 18:00:00", "2016-07-29 00:10:00")
+    assert fixed_windows(t, "6h").tolist() == [0, 0, 1, 6]
+    table = fixed_window_table(t, "6h")
+    assert table["window"].tolist() == list(range(7))
+    assert table["start"].dt.strftime("%Y-%m-%d %H:%M").tolist()[:3] == \
+        ["2016-07-27 12:00", "2016-07-27 18:00", "2016-07-28 00:00"]
+    assert (table["end"] - table["start"] == pd.Timedelta(hours=6)).all()
+    assert fixed_windows(t, "1D").tolist() == [0, 0, 0, 2]
+    order = np.array([3, 1, 0, 2])
+    assert (fixed_windows(t.iloc[order], "6h") == fixed_windows(t, "6h")[order]).all()
+    with pytest.raises(ValueError, match="missing"):
+        fixed_windows(pd.Series(pd.to_datetime(["2016-07-27", None])), "6h")
+    with pytest.raises(ValueError):
+        fixed_windows(t, "W")
+    with pytest.raises(ValueError, match="positive"):
+        fixed_windows(t, "-6h")

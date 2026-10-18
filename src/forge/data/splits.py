@@ -66,3 +66,36 @@ def order_blocks(groups, per_group: int) -> np.ndarray:
     run = np.repeat(np.arange(len(starts)), lengths)
     position = np.arange(len(groups)) - starts[run]
     return position * per_group // lengths[run]
+
+
+def _stamps(timestamps) -> pd.Series:
+    t = pd.to_datetime(pd.Series(timestamps))
+    if t.isna().any():
+        raise ValueError("timestamps hold missing values, which belong to no window")
+    return t
+
+
+def _length(length: str) -> pd.Timedelta:
+    step = pd.Timedelta(length)
+    if step <= pd.Timedelta(0):
+        raise ValueError(f"window length is {length}, expected a positive length such as 6h or 1D")
+    return step
+
+
+def fixed_windows(timestamps, length: str) -> np.ndarray:
+    # windows of one fixed length such as 6h or 1D, anchored at the epoch, so a length that divides a day starts at
+    # the same clock times every day. counted from the window of the earliest timestamp, so an empty window keeps
+    # its place
+    t = _stamps(timestamps)
+    step = _length(length)
+    start = t.dt.floor(length)
+    return ((start - start.min()) // step).to_numpy()
+
+
+def fixed_window_table(timestamps, length: str) -> pd.DataFrame:
+    # every window of the fixed length from the one holding the earliest timestamp to the one holding the latest,
+    # empty ones included, each covering start up to but not including end
+    t = _stamps(timestamps)
+    step = _length(length)
+    starts = pd.date_range(t.min().floor(length), t.max().floor(length), freq=step)
+    return pd.DataFrame({"window": np.arange(len(starts)), "start": starts, "end": starts + step})

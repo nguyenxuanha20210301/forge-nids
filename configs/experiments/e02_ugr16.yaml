@@ -1,0 +1,6 @@
+# flow count, attack prevalence and attack family mix of UGR'16 per window of six hours and per test week
+inherit: [../base.yaml, ../data/ugr16.yaml]
+
+experiment:
+  name: e02_ugr16
+  module: ugr16_overview

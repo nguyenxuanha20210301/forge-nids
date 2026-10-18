@@ -1,29 +1,18 @@
-import hashlib
 import io
 import json
 import tarfile
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from forge.config import load_config
 from forge.data import ugr16 as U
-from forge.paths import configs_dir
 
-# the two test weeks of the fixture, with the mirror paths of the published archives
-WEEKS = ["july_week5", "august_week1"]
-STARTS = {"july_week5": datetime(2016, 7, 27, 0, 0, 0), "august_week1": datetime(2016, 8, 1, 0, 0, 0)}
-
-
-def line(te, label="background", td=0.0, sp=40000, dp=80, pr="TCP", flg="....S.", fwd=0, stos=0, ipkt=1, ibyt=52):
-    # 13 fields as in the published csv files, addresses included. a string stands as it is, so a line can carry a
-    # value the archives should not hold
-    fields = [f"{te:%Y-%m-%d %H:%M:%S}", td if isinstance(td, str) else f"{td:.3f}", "10.0.0.1", "42.219.153.62", sp,
-              dp, pr, flg, fwd, stos, ipkt, ibyt, label]
-    return ",".join(str(f) for f in fields)
+from conftest import UGR16_WEEKS as WEEKS
+from conftest import ugr16_line as line
+from conftest import ugr16_week_rows as week_rows
+from conftest import write_ugr16_mirror as write_mirror
 
 
 def archive(target, lines):
@@ -34,67 +23,6 @@ def archive(target, lines):
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
     return target
-
-
-def week_rows(week, seed, swap):
-    # end times rise one second at a time with ties, a mix of labels, protocols and flag strings, and one pair of
-    # rows out of time order when swap is set
-    rng = np.random.default_rng(seed)
-    kinds = [("background", "TCP", "....S.", 80), ("background", "UDP", "......", 53),
-             ("background", "ICMP", "......", 2048), ("blacklist", "TCP", ".A....", 443),
-             ("dos", "TCP", "....S.", 80), ("scan11", "TCP", "....S.", 22), ("anomaly-spam", "TCP", ".AP.SF", 25),
-             ("background", "255", "  0xc2", 0), ("anomaly-newkind", "UDP", "......", 5060)]
-    rows = []
-    t = STARTS[week]
-    for i in range(40):
-        label, pr, flg, dp = kinds[rng.integers(0, len(kinds))]
-        t = t + timedelta(seconds=int(rng.integers(0, 2)))
-        rows.append({"te": t, "label": label, "pr": pr, "flg": flg, "dp": dp, "sp": int(rng.integers(1024, 65535)),
-                     "td": float(rng.integers(0, 5)), "ipkt": int(rng.integers(1, 9)),
-                     "ibyt": int(rng.integers(40, 2000))})
-    if swap:
-        # rows 10 and 13 are both kept at every third row, and the earlier one ends after the later one
-        rows[9]["te"] = rows[12]["te"] + timedelta(seconds=1)
-    return rows
-
-
-def write_mirror(folder, weeks):
-    # one tar.gz per week in the layout of the published archives, a blank first line, one short line and the member
-    # name of the official csv
-    files, truth = {}, {}
-    for week, rows in weeks.items():
-        month, number = week.split("_")
-        path = f"test/{month}/{number}/{month}_{number}_csv.tar.gz"
-        text = "\n" + "\n".join(line(r["te"], r["label"], r["td"], r["sp"], r["dp"], r["pr"], r["flg"], ipkt=r["ipkt"],
-                                     ibyt=r["ibyt"]) for r in rows[:20])
-        text += "\n2016-08-01 00:00:00,0.000,10.0.0.1,42.219.153.62,1,2,TCP\n"
-        text += "\n".join(line(r["te"], r["label"], r["td"], r["sp"], r["dp"], r["pr"], r["flg"], ipkt=r["ipkt"],
-                               ibyt=r["ibyt"]) for r in rows[20:]) + "\n"
-        data = text.encode()
-        target = folder / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(target, "w:gz") as tar:
-            info = tarfile.TarInfo(f"uniq/{month}.{number}.csv.uniqblacklistremoved")
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-        blob = target.read_bytes()
-        files[week] = (path, len(blob), hashlib.sha256(blob).hexdigest())
-        truth[week] = rows
-    return files, truth
-
-
-@pytest.fixture
-def ugr16_mirror(tmp_path, monkeypatch):
-    storage = tmp_path / "storage"
-    monkeypatch.setenv("FORGE_STORAGE", str(storage))
-    cfg = load_config(configs_dir() / "data" / "ugr16.yaml")
-    cfg["dataset"]["weeks"] = WEEKS
-    cfg["dataset"]["sample_every"] = 3
-    mirror = tmp_path / "mirror"
-    files, truth = write_mirror(mirror, {"july_week5": week_rows("july_week5", 1, swap=False),
-                                         "august_week1": week_rows("august_week1", 2, swap=True)})
-    return SimpleNamespace(cfg=cfg, files=files, truth=truth, url=f"{mirror.as_uri()}/{{path}}",
-                           scratch=tmp_path / "scratch", storage=storage)
 
 
 def test_family_name_maps_known_labels_and_keeps_others():
