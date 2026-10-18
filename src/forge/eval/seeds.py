@@ -36,6 +36,14 @@ TABLES = {
         "estimates": (["arm", "window", "segment", "prevalence", "mix", "natural"], "draws"),
         "windows": (["window", "segment"], None),
     },
+    "e13_ugr16_prevalence": {
+        "by_prevalence": (["arm", "subset", "method", "prevalence", "mix"], "pairs"),
+        "claims": (["arm", "window", "start", "method", "prevalence", "mix"], "draws"),
+        "natural": (["arm", "window", "start", "method"], "draws"),
+        "estimates": (["arm", "window", "start", "prevalence", "mix", "natural"], "draws"),
+        "windows": (["window", "start"], None),
+        "roles": (["role"], None),
+    },
     "e23_unseen_family": {
         "claims": (["stream", "unit", "case", "composition", "policy", "arm"], "draws"),
         "blocks": (["stream", "unit", "case", "composition", "policy", "window", "segment"], None),
@@ -65,6 +73,8 @@ TABLES = {
         "policies": (["rate", "allocation", "floor", "bin"], None),
     },
 }
+# the experiments of RQ1, whose pooled by_prevalence table gives the E1 table of their dataset
+PREVALENCE_EXPERIMENTS = ("e11_anoshift_prevalence", "e12_litnet_prevalence", "e13_ugr16_prevalence")
 # the experiments whose thresholds come from the source run of the same seed, so their configs differ in the run id
 # of the source by design and the pool checks the seed of that run instead
 SOURCE_PER_SEED = ("e21_monitor_streams", "e22_monitor_sweep")
@@ -235,16 +245,16 @@ def e1_table(pooled: pd.DataFrame, summary: dict, experiment: str) -> pd.DataFra
 def e2_table(pooled: pd.DataFrame, summary: dict) -> pd.DataFrame:
     # E2, the violation share of every method on each window of one family at the main prevalence, per arm
     t = pooled[(pooled["prevalence"] == summary["main_prevalence"]) & (pooled["mix"] == "window")]
-    columns = ["arm", "window", "segment", "method", "in_claim", "few_attacks", "window_sessions", "seeds"] + _stats(
-        t, ["rate", "refused", "dismissed_mean", "for_median", "best_up_to_pi_max_dismissed",
-            "best_every_mix_dismissed", "realized_rate"])
+    columns = ["arm", "window", "segment", "start", "method", "in_claim", "few_attacks", "window_sessions",
+               "seeds"] + _stats(t, ["rate", "refused", "dismissed_mean", "for_median", "best_up_to_pi_max_dismissed",
+                                     "best_every_mix_dismissed", "realized_rate"])
     return t.sort_values(["arm", "window", "method"])[[c for c in columns if c in t]].reset_index(drop=True)
 
 
 def e2_natural_table(pooled: pd.DataFrame) -> pd.DataFrame:
-    columns = ["window", "segment", "method", "prevalence", "up_to_pi_max", "in_claim", "window_sessions",
-               "seeds"] + _stats(pooled, ["rate", "refused", "dismissed_mean", "for_median",
-                                          "best_up_to_pi_max_dismissed", "realized_rate"])
+    columns = ["window", "segment", "start", "method", "prevalence", "up_to_pi_max", "in_claim",
+               "window_sessions", "seeds"] + _stats(pooled, ["rate", "refused", "dismissed_mean", "for_median",
+                                                              "best_up_to_pi_max_dismissed", "realized_rate"])
     return pooled.sort_values(["window", "method"])[[c for c in columns if c in pooled]].reset_index(drop=True)
 
 
@@ -372,9 +382,9 @@ def pool_experiment(experiment: str, root=None, out=None, ignore=(), first: str 
             log(f"table {name} is missing in {len(selected) - len(frames)} runs and is not pooled")
             continue
         tables[name] = pool(frames, keys, weight)
-    if experiment in ("e11_anoshift_prevalence", "e12_litnet_prevalence") and "by_prevalence" in tables:
+    if experiment in PREVALENCE_EXPERIMENTS and "by_prevalence" in tables:
         tables["e1_for_by_prevalence"] = e1_table(tables["by_prevalence"], summary, experiment)
-    if experiment == "e12_litnet_prevalence":
+    if experiment in ("e12_litnet_prevalence", "e13_ugr16_prevalence"):
         if "claims" in tables:
             tables["e2_by_family"] = e2_table(tables["claims"], summary)
         if "natural" in tables:

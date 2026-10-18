@@ -1,0 +1,108 @@
+# RQ1 on UGR'16 and the source of E3 there, the false omission rate and the dismissed share of each method in the
+# deployment windows of six hours of August 2016, their attacks thinned to a range of prevalences, the roles by clock
+inherit: [../base.yaml, ../data/ugr16.yaml]
+
+experiment:
+  name: e13_ugr16_prevalence
+  module: ugr16_prevalence
+
+split:
+  # the roles by clock at window boundaries, the archive week as provenance only. training runs from the first flow
+  # to the start of selection, selection to the start of calibration, calibration to the start of deployment, and
+  # deployment from there to the last flow, 86 windows of six hours in the published weeks, 84 full ones and the two
+  # of August 29. the cut inside August week 1 was checked on the e02 run of record, every family that stands alone
+  # holds far more than its floor of calibration attacks in the second half of the week, and the first half cannot
+  # be the calibration at the calibration prevalence below, it holds too few labelled flows
+  selection_start: "2016-08-01 00:00"
+  calibration_start: "2016-08-04 12:00"
+  deployment_start: "2016-08-08 00:00"
+
+families:
+  # left out of every class, role and window. blacklist marks an address on a public list and not the traffic, so a
+  # scorer without addresses cannot learn it, and as an attack family it would be unsafe at every threshold and
+  # decide every certificate. a labelled family without calibration attacks leaves the same way, the UDP scan of
+  # August 1 and the one SSH scan flow of August 23, and the share of its scored flows dismissed at the threshold of
+  # every method is saved as a table of its own
+  left_out: [blacklist]
+
+scorer:
+  # flow features of the processed table, sp_range is the source port reduced to its IANA range. the forwarding
+  # status fwd stays out, it is left for the ablations of E9
+  features: [td, proto, tcp_flags, stos, ipkt, ibyt, dp, sp_range]
+  categorical: [proto, tcp_flags]
+  # boosting rounds at most, training stops once the loss on the selection part has not improved for early_stopping
+  # rounds
+  rounds: 1000
+  early_stopping: 50
+  params:
+    objective: binary
+    metric: binary_logloss
+    learning_rate: 0.1
+    num_leaves: 63
+    min_data_in_leaf: 100
+    feature_fraction: 0.9
+    bagging_fraction: 0.8
+    bagging_freq: 1
+    deterministic: true
+    force_col_wise: true
+    verbosity: -1
+
+certify:
+  epsilon: 0.001
+  delta: 0.05
+  # share of delta for the benign bound offline and for the bound on the window's dismissed share online, the rest
+  # goes to the miss rate bound of each attack family
+  delta_benign: 0.025
+  pi_max: 0.1
+  # the sequence starts at the loosest threshold that would pass with up to start_misses misses in every family, as
+  # long as it dismisses at most start_slack more than the first threshold that would pass with no miss
+  start_misses: 2
+  start_slack: 0.05
+  # LTT starts its sequence by the same rule, with attacks among the dismissed flows in place of misses and the share
+  # of calibration flows dismissed in place of the benign one, false starts it at the first threshold that could pass
+  # with no attack
+  ltt_guarded_start: true
+  # thresholds at the benign quantiles j / (grid_size + 1) of the selection part, and at the levels of grid_tail,
+  # where the misses of a scorer that separates the families almost perfectly may all lie
+  grid_size: 1000
+  grid_tail: [0.9995, 0.9998, 0.9999, 0.99995, 0.99998, 0.99999]
+  # a family is its own family only when its expected calibration attacks could certify, with no miss, a threshold
+  # dismissing this share of the benign flows, 1,364 attacks at the values above. the others are merged
+  family_floor: 0.3
+  # LTT at a prevalence estimated on the window, plug in and upper bound. the threshold t_star is fixed on the
+  # selection part at the point where the benign and the attack shares at the calibration mix differ most, the
+  # estimate reads the shares at or below it, and the upper bound takes a two sided DKW event on the benign cdf of
+  # the calibration draw at delta_benign, which also serves the certificate's benign bound, the window's one sided
+  # DKW bound at delta_window and a Clopper-Pearson bound on the miss rate at t_star at delta_miss, the family bound
+  # of the certificate keeping the rest of delta
+  estimate:
+    threshold: ks
+    delta_benign: 0.01
+    delta_window: 0.01
+    delta_miss: 0.005
+
+calibration:
+  # the calibration part keeps all its benign flows and has its attacks thinned to this prevalence
+  prevalence: 0.02
+  # balanced caps the attacks of every family at one count, so that only the largest families are thinned to reach the
+  # prevalence, natural thins every family by the same factor
+  mix: balanced
+
+deployment:
+  # each window keeps all its benign flows and has its attacks thinned to each prevalence
+  prevalences: [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
+  # the mix of attack families among the attacks of a window, window for the window's own mix, calibration for the
+  # mix of the calibration set
+  mixes: [window, calibration]
+  # the prevalence of the figure over windows
+  main_prevalence: 0.1
+  # a real window above its own prevalence keeps all its attacks and has its benign flows subsampled, false leaves
+  # such a window out as e11 did
+  subsample_benign: true
+  # a window whose rate rests on fewer attacks of a family than this is flagged, and the drift figure leaves the
+  # family's miss rate out there, since a handful of attacks would decide it
+  min_family_attacks: 1000
+
+simulation:
+  methods: [forge_simplex, forge_pooled, forge_online, ltt_iid, ltt_plugin, ltt_upper, conformal_fnr, fixed_sel]
+  draws: 1000

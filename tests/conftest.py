@@ -424,3 +424,111 @@ def ugr16_mirror(tmp_path, monkeypatch):
                                                "august_week1": ugr16_week_rows("august_week1", 2, swap=True)})
     return SimpleNamespace(cfg=cfg, files=files, truth=truth, url=f"{mirror.as_uri()}/{{path}}",
                            scratch=tmp_path / "scratch", storage=storage)
+
+
+# windows of six hours of a processed UGR'16 table whose features carry the label, from 2016-07-30 12:00 on, the attacks
+# of each family in each window. the launched families burst in the 00:00 and 12:00 windows and stop after the second
+# window of August 2, the spam runs from 12:00 to 06:00 and surges once above pi_max, the udp scan is one burst in
+# the second half of July 31, the ssh scan one flow on August 2, the last two windows hold no attack, and the blacklist
+# runs through every window. the benign flows follow a daily cycle and drift a little with the time of day
+UGR16_SIGNAL_START = datetime(2016, 7, 30, 12, 0, 0)
+UGR16_SIGNAL_BENIGN = {12: 4200, 18: 4000, 0: 3200, 6: 3000}
+UGR16_SIGNAL_BLACKLIST = {12: 18, 18: 17, 0: 13, 6: 12}
+UGR16_SIGNAL_WINDOWS = [
+    {"dos": 260, "scan44": 130, "scan11": 35, "nerisbotnet": 110, "anomaly_spam": 150},
+    {"anomaly_spam": 220},
+    {"dos": 250, "scan44": 125, "scan11": 30, "anomaly_spam": 180},
+    {"anomaly_spam": 5},
+    {"dos": 270, "scan44": 135, "scan11": 40, "nerisbotnet": 120, "anomaly_spam": 160, "anomaly_udpscan": 200},
+    {"anomaly_spam": 230},
+    {"dos": 300, "scan44": 150, "scan11": 40, "nerisbotnet": 120, "anomaly_spam": 400},
+    {"anomaly_spam": 10},
+    {"dos": 240, "scan44": 120, "scan11": 30, "nerisbotnet": 100, "anomaly_spam": 170},
+    {"anomaly_spam": 250},
+    {"dos": 230, "scan44": 115, "scan11": 30, "anomaly_spam": 150},
+    {"anomaly_spam": 8},
+    {"anomaly_spam": 2600},
+    {"anomaly_spam": 300, "anomaly_sshscan": 1},
+    {},
+    {},
+]
+# how far each family's attacks sit from the benign flows in the features that carry the label, the smallest family
+# closest, so the low tail of the attack scores holds misses. the blacklist sits with the benign flows, since its label
+# marks an address and not the traffic
+UGR16_SIGNAL_LEVELS = {"dos": 0.62, "scan44": 0.60, "scan11": 0.53, "nerisbotnet": 0.56, "anomaly_spam": 0.55,
+                       "anomaly_udpscan": 0.50, "anomaly_sshscan": 0.50}
+UGR16_SIGNAL_PROTOCOLS = {"anomaly_udpscan": "UDP"}
+
+
+def ugr16_signal_frame(windows, seed):
+    # the processed v1 layout, rows sorted by te, week and row_id, row ids in a shuffled source order within each
+    # archive week, the week boundary at midnight of August 1
+    from forge.data import ugr16
+
+    rng = np.random.default_rng(seed)
+    frames = []
+    for i, families in enumerate(windows):
+        # a window given as none holds no flow at all
+        if families is None:
+            continue
+        start = UGR16_SIGNAL_START + timedelta(hours=6 * i)
+        hour = start.hour
+        kind = np.array(["benign"] * UGR16_SIGNAL_BENIGN[hour] + ["blacklist"] * UGR16_SIGNAL_BLACKLIST[hour]
+                        + [f for f, count in families.items() for _ in range(count)])
+        n = len(kind)
+        attack = kind != "benign"
+        base = 0.3 + 0.015 * (hour // 6)
+        level = np.array([UGR16_SIGNAL_LEVELS.get(k, base) for k in kind])
+
+        def signal():
+            # one noisy look at the level of every flow, each feature that carries the label takes its own
+            return np.clip(rng.normal(level, 0.15), 0, 1)
+
+        proto = np.where(attack, [UGR16_SIGNAL_PROTOCOLS.get(k, "TCP") for k in kind],
+                         rng.choice(["TCP", "UDP", "ICMP"], n, p=[0.7, 0.25, 0.05]))
+        te = np.datetime64(start, "ms") + rng.integers(0, 6 * 3600, n).astype("timedelta64[s]")
+        frames.append(pd.DataFrame({
+            "te": te.astype("datetime64[ms]"),
+            "label": attack.astype(np.int8),
+            "family": pd.Categorical(kind, categories=ugr16.FAMILY_ORDER),
+            "td": (10 * signal()).round(3),
+            "proto": pd.Categorical(proto, categories=["ICMP", "TCP", "UDP"]),
+            "tcp_flags": np.where(attack & (rng.random(n) < 0.5), 2, rng.choice([2, 16, 18, 24, 27], n)).astype(
+                np.uint8),
+            "fwd": rng.choice([0, 64], n).astype(np.uint8),
+            "stos": rng.choice([0, 0, 40], n).astype(np.uint8),
+            "ipkt": np.maximum(1, np.round(np.exp(4 * signal()))).astype(np.int64),
+            "ibyt": np.maximum(40, np.round(np.exp(8 * signal()))).astype(np.int64),
+            "sp": np.where(rng.random(n) < 0.1, rng.integers(1, 1024, n), rng.integers(1024, 65536, n)).astype(
+                np.int32),
+            "dp": rng.choice([0, 25, 53, 80, 443, 2048], n).astype(np.int32),
+        }))
+    frame = pd.concat(frames, ignore_index=True)
+    week = np.where(frame["te"].to_numpy() < np.datetime64("2016-08-01", "ms"), UGR16_WEEKS[0], UGR16_WEEKS[1])
+    frame["week"] = pd.Categorical(week, categories=UGR16_WEEKS)
+    row_id = np.zeros(len(frame), dtype=np.int32)
+    for w in UGR16_WEEKS:
+        mine = np.flatnonzero(week == w)
+        row_id[mine] = rng.permutation(len(mine)) + 1
+    frame["row_id"] = row_id
+    frame = frame.sort_values(["te", "week", "row_id"], kind="stable", ignore_index=True)
+    return frame[ugr16.SCHEMA.names]
+
+
+@pytest.fixture
+def ugr16_signal(tmp_path, monkeypatch, request):
+    # written where ugr16.load finds it, with the manifest fields the experiments read. a test may pass other windows
+    # through indirect parametrization
+    from forge.data import ugr16
+
+    monkeypatch.setenv("FORGE_STORAGE", str(tmp_path / "storage"))
+    cfg = load_config(configs_dir() / "data" / "ugr16.yaml")
+    frame = ugr16_signal_frame(getattr(request, "param", UGR16_SIGNAL_WINDOWS), seed=11)
+    out = ugr16.processed_dir(cfg)
+    out.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pandas(frame, schema=ugr16.SCHEMA, preserve_index=False), out / "flows.parquet",
+                   row_group_size=5000)
+    (out / "manifest.json").write_text(json.dumps({"fingerprint": ugr16.fingerprint(frame), "sample_every": 50,
+                                                   "rows": len(frame), "rows_in_weeks": 50 * len(frame)}),
+                                       encoding="utf-8")
+    return SimpleNamespace(cfg=cfg, frame=frame)

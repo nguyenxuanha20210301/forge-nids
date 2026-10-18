@@ -605,7 +605,10 @@ def load(cfg: dict, columns: list[str] | None = None, weeks: list[str] | None = 
     # the processed table in the order it was written, by flow end with ties by week and then by row_id, only the
     # given weeks when weeks is set. the known families come first in the category order, any other label after them
     filters = None if weeks is None else [("week", "in", list(weeks))]
-    flows = pq.read_table(processed_dir(cfg) / "flows.parquet", columns=columns, filters=filters).to_pandas()
+    # the arrow buffers are handed to pandas column by column and released as they go, so the full table of 79
+    # million flows is in memory once and not twice during the conversion
+    flows = pq.read_table(processed_dir(cfg) / "flows.parquet", columns=columns, filters=filters).to_pandas(
+        split_blocks=True, self_destruct=True)
     if "family" in flows.columns:
         seen = list(flows["family"].cat.categories)
         flows["family"] = flows["family"].cat.set_categories(FAMILY_ORDER + sorted(set(seen) - set(FAMILY_ORDER)))
