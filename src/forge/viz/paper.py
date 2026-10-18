@@ -18,16 +18,17 @@ from forge.eval.paper import paper_rows
 from forge.viz import layout, prevalence, style
 from forge.viz.prevalence import BEST_LINES
 
-DATASET_LABELS = {"anoshift": "AnoShift, blocks of 2010", "litnet2020": "LITNET-2020, capture windows"}
-DATASET_SHORT = {"anoshift": "AnoShift", "litnet2020": "LITNET-2020"}
-DATASET_UNITS = {"anoshift": "sessions", "litnet2020": "flows"}
+DATASET_LABELS = {"anoshift": "AnoShift, blocks of 2010", "litnet2020": "LITNET-2020, capture windows",
+                  "ugr16": "UGR'16, windows of six hours"}
+DATASET_SHORT = {"anoshift": "AnoShift", "litnet2020": "LITNET-2020", "ugr16": "UGR'16"}
+DATASET_UNITS = {"anoshift": "sessions", "litnet2020": "flows", "ugr16": "flows"}
 # the yardsticks of E7 in the dashes and words of the E1 figure
 YARDSTICK_LINES = {name: (dash, label) for name, dash, label in [*BEST_LINES, EVERY_LINE]}
 # the arms of E6 the paper shows, the one sequence, a sequence from every window, the per window audit and none
 E6_ARMS = ["monitor", "monitor_any", "window_audit", "none"]
 # the monitoring arm of E7 per dataset, the operating rule of the paper, a sequence per year where the stream has
-# years and one sequence from the start of the deployment where it has none
-E7_MONITOR_ARMS = {"anoshift": "monitor_year", "litnet2020": "monitor"}
+# years, per clock week where it has weeks, and one sequence from the start of the deployment where it has neither
+E7_MONITOR_ARMS = {"anoshift": "monitor_year", "litnet2020": "monitor", "ugr16": "monitor_week"}
 
 
 def _method_line(method: str) -> dict:
@@ -178,7 +179,8 @@ def e7_workload_vs_risk(certification: pd.DataFrame, monitoring: pd.DataFrame) -
     certification = _with_columns(certification, ["dataset", "mix", "main", "policy"])
     monitoring = paper_rows(_with_columns(monitoring, ["dataset", "composition", "arm", "policy"]))
     datasets = [d for d in DATASET_LABELS if d in set(certification["dataset"]) or d in set(monitoring["dataset"])]
-    fig, axes = plt.subplots(2, max(len(datasets), 1), figsize=(style.WIDTH_DOUBLE, 5.2), squeeze=False)
+    # the axis labels take two lines, since three datasets leave a panel too narrow for one
+    fig, axes = plt.subplots(2, max(len(datasets), 1), figsize=(style.WIDTH_DOUBLE, 5.6), squeeze=False)
     sticks = {}
     drawn = set()
     for ax, dataset in zip(axes[0], datasets):
@@ -200,7 +202,7 @@ def e7_workload_vs_risk(certification: pd.DataFrame, monitoring: pd.DataFrame) -
                         yerr=[[max(y - y_low, 0)], [max(y_high - y, 0)]], linestyle="none", markersize=4,
                         elinewidth=0.8, capsize=0, **_method_line(r.policy))
         ax.set_xlim(-0.02, 1.02)
-        ax.set_xlabel(f"share of pairs with FOR > $\\varepsilon$, {DATASET_SHORT[dataset]}")
+        ax.set_xlabel(f"share of pairs with FOR > $\\varepsilon$,\n{DATASET_SHORT[dataset]}")
         ax.set_ylabel("workload per 1,000 flows")
         if c.empty:
             ax.axis("off")
@@ -223,7 +225,7 @@ def e7_workload_vs_risk(certification: pd.DataFrame, monitoring: pd.DataFrame) -
                         elinewidth=0.8, capsize=0, markerfacecolor=line["color"] if r.arm == monitor else "white",
                         **line)
         ax.set_xscale("symlog", linthresh=10)
-        ax.set_xlabel(f"attacks let through per million flows, {DATASET_SHORT[dataset]}")
+        ax.set_xlabel(f"attacks let through per million flows,\n{DATASET_SHORT[dataset]}")
         ax.set_ylabel("workload per 1,000 flows")
         if m.empty:
             ax.axis("off")

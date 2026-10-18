@@ -8,6 +8,8 @@ violating policy off and everything after the switch off is escalated. a policy 
 once the monitor rides on it, and the price shows in its workload.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -54,21 +56,22 @@ def certification(run_dir, audit_rate: float) -> pd.DataFrame:
 
 def monitoring(run_dir, control=None) -> pd.DataFrame:
     """the escalations, the audits and the attacks let through per million flows of every policy under each
-    monitoring arm on the real streams of an e21 or e23 run, per composition. for e23 the streams of the control,
+    monitoring arm on the real streams of an e21, e23 or e24 run, per composition. for e23 the streams of the control,
     with every family known, at the typical composition stand for the deployment, unless control names a unit, whose
     streams with its family unseen are read instead."""
     summary = runs.load_json(run_dir, "summary")
     claims = runs.load_table(run_dir, "claims")
-    blocks = runs.load_table(run_dir, "blocks")
+    # e24 keeps its per window table as by_window, a block being a window of six hours of UGR16
+    blocks = runs.load_table(run_dir, "blocks" if (Path(run_dir) / "results" / "blocks.parquet").exists()
+                             else "by_window")
+    # the dataset of the source run, AnoShift where the summary names none
+    dataset = summary.get("source", {}).get("dataset", "anoshift")
     if "unit" in claims:
-        dataset = summary["source"]["dataset"]
         unit, case = (summary["control"], "known") if control is None else (control, "unseen")
         if control is None:
             unit = claims["unit"].iloc[0]
         claims = claims[(claims["unit"] == unit) & (claims["case"] == case)]
         blocks = blocks[(blocks["unit"] == unit) & (blocks["case"] == case)]
-    else:
-        dataset = "anoshift"
     sessions = blocks.drop_duplicates(["composition", "window"]).groupby("composition")["window_sessions"].sum()
     rows = []
     # a run with both kinds of stream keeps the stream beside the policy and the arm

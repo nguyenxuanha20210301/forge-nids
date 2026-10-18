@@ -40,7 +40,7 @@ def reading(experiment: str, tables: dict) -> None:
         t = t[t["arm"] == "reference"]
         print(f"\nE2, the reference window of every family at the main prevalence, share of draws with FOR above "
               "epsilon")
-        print(t[["segment", "method", "in_claim"] + seeds._stats(t, ["rate"])]
+        print(t[[c for c in ["segment", "start"] if c in t] + ["method", "in_claim"] + seeds._stats(t, ["rate"])]
               .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
     if "e5_by_scorer" in tables:
         t = tables["e5_by_scorer"]
@@ -64,9 +64,9 @@ def reading(experiment: str, tables: dict) -> None:
               .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
     if "e3_by_policy" in tables:
         t = tables["e3_by_policy"]
-        t = t[t["arm"].isin(["monitor", "monitor_year", "none"])]
-        print(f"\nE3, the alarm and the leakage of every policy under one sequence, a sequence per year and no "
-              f"monitoring over {t['seeds'].max()} seeds")
+        t = t[t["arm"].isin(["monitor", "monitor_year", "monitor_week", "none"])]
+        print(f"\nE3, the alarm and the leakage of every policy under one sequence, a sequence per year or per week "
+              f"and no monitoring over {t['seeds'].max()} seeds")
         print(t[[c for c in ["stream", "composition", "policy", "arm"] if c in t]
                 + seeds._stats(t, ["alarm_rate", "alarm_block_median", "leak_median", "miscover_sequence_rate"])]
               .to_string(index=False, float_format=lambda v: f"{v:.4f}"))

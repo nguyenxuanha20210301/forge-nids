@@ -480,8 +480,9 @@ def test_e13_tables_figures_and_window_rates(ugr16_signal, tmp_path):
     # the run pools over seeds like e12, with the start of every window beside its index
     tables = seeds.pool_experiment("e13_ugr16_prevalence", tmp_path / "runs", out=tmp_path / "pooled",
                                    log=lambda s: None)
-    assert {"by_prevalence", "claims", "natural", "windows", "roles", "e1_for_by_prevalence", "e2_by_family",
-            "e2_natural"} <= set(tables)
+    assert {"by_prevalence", "claims", "natural", "windows", "roles", "unseen_udpscan", "unseen_sshscan",
+            "e1_for_by_prevalence", "e2_by_family", "e2_natural"} <= set(tables)
+    assert tables["unseen_udpscan"]["seeds"].tolist() == [1] * len(tables["unseen_udpscan"])
     assert "start" in tables["e2_by_family"] and len(tables["e2_by_family"]) == len(main[main["mix"] == "window"])
     assert len(tables["e1_for_by_prevalence"]) == len(inside[inside["arm"] == "reference"]) + len(
         by_prevalence[(by_prevalence["subset"] == "in_claim") & (by_prevalence["mix"] == "calibration")

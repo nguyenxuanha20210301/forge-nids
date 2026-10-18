@@ -223,6 +223,72 @@ def test_e7_monitoring_over_two_seeds_and_the_e3_tables(tmp_path):
     assert paper.e3_tables({"e11": {}}) == {}
 
 
+def test_the_tables_take_the_third_dataset():
+    pooled = {"e11": {"e1_for_by_prevalence": pooled_e1("anoshift", ["forge_simplex"])},
+              "e13": {"e1_for_by_prevalence": pooled_e1("ugr16", ["forge_simplex", "ltt_iid"])}}
+    table = paper.e1_table(pooled)
+    assert table["dataset"].tolist() == ["anoshift"] * 4 + ["ugr16"] * 8
+    # the E2 tables name a window of LITNET by its segment and one of UGR16 by its start
+    natural = pd.DataFrame({"window": [0], "method": ["forge_simplex"], "prevalence": [0.03], "up_to_pi_max": [True],
+                            "in_claim": [True], "window_sessions": [100], "seeds": [2], "rate_pooled": [0.0],
+                            "rate_median": [0.0]})
+    out = paper.e2_tables({"e12": {"e2_natural": natural.assign(segment="LAND")},
+                           "e13": {"e2_natural": natural.assign(start="2016-08-08 00:00")}})
+    t = out["e2_natural"]
+    assert t["dataset"].tolist() == ["litnet2020", "ugr16"] and "rate_pooled" in t
+    assert t["segment"].iloc[0] == "LAND" and t["start"].iloc[1] == "2016-08-08 00:00"
+    assert pd.isna(t["segment"].iloc[1]) and pd.isna(t["start"].iloc[0])
+    assert paper.e2_tables({"e11": {}}) == {}
+    # the E3 table holds both stream datasets
+    claims = pd.DataFrame({"policy": ["forge_simplex"], "composition": ["typical"], "arm": ["monitor_week"],
+                           "seeds": [2], "alarm_rate_pooled": [0.0]})
+    out = paper.e3_tables({"e21": {"e3_by_policy": claims.assign(arm="monitor_year")},
+                           "e24": {"e3_by_policy": claims}})
+    assert out["e3_by_policy"]["dataset"].tolist() == ["anoshift", "ugr16"]
+    assert out["e3_by_policy"]["arm"].tolist() == ["monitor_year", "monitor_week"]
+
+
+def test_e1_table_lines_up_one_seed_with_many():
+    # a dataset pooled over one seed keeps the plain names of its run, and gets the forms of the others
+    one = pooled_e1("ugr16", ["forge_simplex", "ltt_iid"], seeds=1)
+    plain = {c: c[:-len("_median")] for c in one.columns if c.endswith("_median")}
+    one = one.rename(columns=plain).drop(columns=[c for c in one.columns if c.endswith(("_low", "_high", "_pooled"))])
+    pooled = {"e11": {"e1_for_by_prevalence": pooled_e1("anoshift", ["forge_simplex"])},
+              "e13": {"e1_for_by_prevalence": one}}
+    table = paper.e1_table(pooled)
+    assert table.columns.is_unique and "for_median" not in table and "violation_rate_pooled" in table
+    rows = paper.e1_rows(table[table["dataset"] == "ugr16"], "window")
+    assert rows.columns.is_unique and len(rows) == 4
+    r = rows[(rows["method"] == "ltt_iid") & (rows["prevalence"] == 0.1)].iloc[0]
+    assert r["violation_rate"] == pytest.approx(0.01) and r["for_low"] == r["for_median"] == r["for_high"]
+    assert r["dismissed_low"] == r["dismissed_mean"] == pytest.approx(0.45)
+
+
+def test_e7_monitoring_reads_the_windows_of_ugr16(tmp_path):
+    claims = pd.DataFrame([{"stream": stream, "composition": "typical", "policy": p, "arm": arm,
+                            "dismissed_share_mean": 0.9, "audits_mean": 20.0, "leak_median": 5.0,
+                            "realized_for_median": 1e-4, "alarm_rate": 0.1 if arm == "monitor_week" else 0.0}
+                           for stream in ("simulated", "replay") for p in ("forge_simplex", "ltt_iid")
+                           for arm in ("monitor_week", "monitor", "none")])
+    by_window = pd.DataFrame({"stream": ["simulated"] * 2 + ["replay"] * 2, "composition": ["typical"] * 4,
+                              "window": [0, 1, 0, 1], "start": ["2016-08-08 00:00", "2016-08-08 06:00"] * 2,
+                              "window_sessions": [400, 600] * 2})
+    folder = fake_run(tmp_path, "e24_ugr16_streams", "20261018-000000_c", {"seed": 0},
+                      tables=[("claims", claims), ("by_window", by_window)],
+                      summary={"source": {"dataset": "ugr16"}})
+    table = paper.e7_monitoring({0: folder})
+    assert set(table["dataset"]) == {"ugr16"} and (table["sessions"] == 1000).all()
+    row = table[(table["stream"] == "replay") & (table["policy"] == "ltt_iid")
+                & (table["arm"] == "monitor_week")].iloc[0]
+    assert row["leaked_per_million_median"] == pytest.approx(5.0 / 1000 * 1e6)
+    assert row["workload_per_million_median"] == pytest.approx(0.1e6 + 20.0 / 1000 * 1e6)
+    # the figure draws the sequence per week as the monitor of UGR16, filled, and no monitoring hollow
+    fig = figures.e7_workload_vs_risk(pd.DataFrame(), table)
+    assert len(fig.axes) == 2 and "UGR'16" in fig.axes[1].get_xlabel()
+    points = [line for line in fig.axes[1].get_lines() if len(line.get_xdata()) == 1]
+    assert sum(line.get_markerfacecolor() == "white" for line in points) == 2 and len(points) == 4
+
+
 def test_paper_rows_keep_the_replay_where_a_dataset_has_it(tmp_path):
     t = pd.DataFrame({"dataset": ["anoshift"] * 2 + ["litnet2020"], "stream": ["simulated", "replay", "simulated"],
                       "policy": ["a", "a", "b"]})

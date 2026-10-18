@@ -1,5 +1,5 @@
-"""the tables and figures of the paper over seeds, from the pooled tables of e11, e12, e21, e22, e23, e31 and e32 and
-the run folders of their seeds.
+"""the tables and figures of the paper over seeds, from the pooled tables of e11, e12, e13, e21, e22, e23, e24, e31
+and e32 and the run folders of their seeds.
 
     python analysis/paper_results.py
     python analysis/paper_results.py --out results --e21 20261014-232506_44dd25a --audit-rate 0.005
@@ -51,14 +51,15 @@ def tables_of(pooled: dict, args) -> dict:
         row.update({"seeds": len(listed), "first_run": listed["run_id"].min(), "last_run": listed["run_id"].max()})
         settings.append(row)
     out["settings"] = pd.DataFrame(settings)
-    if "e11" in pooled or "e12" in pooled:
+    if any(name in pooled for name in ("e11", "e12", "e13")):
         out["e1_for_by_prevalence"] = paper.e1_table(pooled)
     out.update(paper.e2_tables(pooled))
     out.update(paper.e3_tables(pooled))
     out.update(paper.e5_tables(pooled))
     out.update(paper.e6_tables(pooled))
     certification = [paper.e7_certification(paper.run_folders(pooled[n], paper.EXPERIMENTS[n]), args.audit_rate)
-                     for n in ("e11", "e12") if n in pooled and paper.run_folders(pooled[n], paper.EXPERIMENTS[n])]
+                     for n in ("e11", "e12", "e13")
+                     if n in pooled and paper.run_folders(pooled[n], paper.EXPERIMENTS[n])]
     if certification:
         out["e7_certification"] = pd.concat(certification, ignore_index=True)
         out["e7_frontier"] = paper.e7_frontier(out["e7_certification"])
@@ -74,8 +75,9 @@ def tables_of(pooled: dict, args) -> dict:
                                          pd.DataFrame([{"experiment": "e21_monitor_streams", "dataset": "anoshift",
                                                         "seeds": 1, "first_run": e21.name, "last_run": e21.name}])],
                                         ignore_index=True)
-    if "e23" in pooled and paper.run_folders(pooled["e23"], paper.EXPERIMENTS["e23"]):
-        monitoring.append(paper.e7_monitoring(paper.run_folders(pooled["e23"], paper.EXPERIMENTS["e23"])))
+    for n in ("e23", "e24"):
+        if n in pooled and paper.run_folders(pooled[n], paper.EXPERIMENTS[n]):
+            monitoring.append(paper.e7_monitoring(paper.run_folders(pooled[n], paper.EXPERIMENTS[n])))
     if monitoring:
         out["e7_monitoring"] = pd.concat(monitoring, ignore_index=True)
     return out
@@ -89,7 +91,7 @@ def draw(tables: dict, folder: Path) -> list[str]:
     if "e1_for_by_prevalence" in read:
         t = read["e1_for_by_prevalence"]
         rows = []
-        for name in ("e11", "e12"):
+        for name in ("e11", "e12", "e13"):
             experiment = paper.EXPERIMENTS[name]
             dataset = paper.DATASETS[name]
             if experiment not in settings.index or dataset not in set(t["dataset"]):

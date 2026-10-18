@@ -43,6 +43,8 @@ TABLES = {
         "estimates": (["arm", "window", "start", "prevalence", "mix", "natural"], "draws"),
         "windows": (["window", "start"], None),
         "roles": (["role"], None),
+        "unseen_udpscan": (["family", "method"], "thresholds"),
+        "unseen_sshscan": (["family", "method"], "thresholds"),
     },
     "e23_unseen_family": {
         "claims": (["stream", "unit", "case", "composition", "policy", "arm"], "draws"),

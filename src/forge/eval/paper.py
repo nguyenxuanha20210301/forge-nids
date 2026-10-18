@@ -14,11 +14,11 @@ from forge import paths, runs
 from forge.eval import seeds, workload
 
 # the pooled folder of each experiment the paper reads, under pooled/ of the storage root
-EXPERIMENTS = {"e11": "e11_anoshift_prevalence", "e12": "e12_litnet_prevalence", "e21": "e21_monitor_streams",
-               "e22": "e22_monitor_sweep", "e23": "e23_unseen_family", "e31": "e31_anoshift_scorers",
-               "e32": "e32_litnet_scorers"}
-DATASETS = {"e11": "anoshift", "e12": "litnet2020", "e21": "anoshift", "e22": "anoshift", "e23": "litnet2020",
-            "e31": "anoshift", "e32": "litnet2020"}
+EXPERIMENTS = {"e11": "e11_anoshift_prevalence", "e12": "e12_litnet_prevalence", "e13": "e13_ugr16_prevalence",
+               "e21": "e21_monitor_streams", "e22": "e22_monitor_sweep", "e23": "e23_unseen_family",
+               "e24": "e24_ugr16_streams", "e31": "e31_anoshift_scorers", "e32": "e32_litnet_scorers"}
+DATASETS = {"e11": "anoshift", "e12": "litnet2020", "e13": "ugr16", "e21": "anoshift", "e22": "anoshift",
+            "e23": "litnet2020", "e24": "ugr16", "e31": "anoshift", "e32": "litnet2020"}
 # the columns of the pooled tables that reach the paper, in their median, low, high and pooled forms
 E1_COLUMNS = ["violation_rate", "violation_window_max", "refused", "dismissed_mean", "for_median",
               "best_up_to_pi_max_dismissed", "best_at_prevalence_dismissed", "best_every_mix_dismissed",
@@ -81,16 +81,20 @@ def _keep(table: pd.DataFrame, first: list[str], columns) -> pd.DataFrame:
 
 def e1_table(pooled: dict) -> pd.DataFrame:
     """E1, the FOR, the violation share and the dismissed share of every method against the prevalence on the windows
-    RQ1 is read on, both datasets in one table, every mix."""
+    RQ1 is read on, the three datasets in one table, every mix."""
     parts = []
-    for name in ("e11", "e12"):
+    for name in ("e11", "e12", "e13"):
         if name not in pooled or "e1_for_by_prevalence" not in pooled[name]:
             continue
-        t = pooled[name]["e1_for_by_prevalence"].copy()
+        t = uniform(pooled[name]["e1_for_by_prevalence"], E1_COLUMNS)
         t.insert(0, "dataset", DATASETS[name])
+        # a share the seed never moved has no pooled form, and its one value is the share over every seed
+        for col in E1_COLUMNS:
+            if seeds._is_rate(col) and f"{col}_median" in t and f"{col}_pooled" not in t:
+                t[f"{col}_pooled"] = t[f"{col}_median"]
         parts.append(_keep(t, ["dataset", "method", "mix", "prevalence", "main", "windows", "seeds"], E1_COLUMNS))
     if not parts:
-        raise ValueError("no E1 table in the pooled folders of e11 and e12")
+        raise ValueError("no E1 table in the pooled folders of e11, e12 and e13")
     return pd.concat(parts, ignore_index=True)
 
 
@@ -110,17 +114,22 @@ def e1_rows(table: pd.DataFrame, mix: str = "window") -> pd.DataFrame:
 
 
 def e2_tables(pooled: dict) -> dict:
-    """E2, the violation share of every method on the window of each family of LITNET at the main prevalence, per
-    arm, and the real windows at their own prevalence."""
+    """E2, the violation share of every method on the window of each family of LITNET and on each window of six
+    hours of UGR16 at the main prevalence, per arm, and the real windows of both at their own prevalence, one table
+    each. a window of LITNET is named by its segment and one of UGR16 by its start."""
     out = {}
-    if "e12" in pooled and "e2_by_family" in pooled["e12"]:
-        out["e2_by_family"] = _keep(pooled["e12"]["e2_by_family"], ["arm", "window", "segment", "method", "in_claim",
-                                                                  "few_attacks", "window_sessions", "seeds"],
-                                    E2_COLUMNS)
-    if "e12" in pooled and "e2_natural" in pooled["e12"]:
-        out["e2_natural"] = _keep(pooled["e12"]["e2_natural"], ["window", "segment", "method", "prevalence",
-                                                              "up_to_pi_max", "in_claim", "window_sessions", "seeds"],
-                                  E2_COLUMNS)
+    for table, first in [("e2_by_family", ["dataset", "arm", "window", "segment", "start", "method", "in_claim",
+                                           "few_attacks", "window_sessions", "seeds"]),
+                         ("e2_natural", ["dataset", "window", "segment", "start", "method", "prevalence",
+                                         "up_to_pi_max", "in_claim", "window_sessions", "seeds"])]:
+        parts = []
+        for name in ("e12", "e13"):
+            if name in pooled and table in pooled[name]:
+                t = uniform(pooled[name][table], E2_COLUMNS)
+                t.insert(0, "dataset", DATASETS[name])
+                parts.append(_keep(t, first, E2_COLUMNS))
+        if parts:
+            out[table] = pd.concat(parts, ignore_index=True)
     return out
 
 
@@ -163,13 +172,14 @@ def e6_tables(pooled: dict) -> dict:
 
 def e3_tables(pooled: dict) -> dict:
     """E3 and E4, the alarm, the leakage, the bound and the coverage of every arm on the real streams of AnoShift
-    per policy and composition over seeds, and the same per cell of the sweep."""
+    and UGR16 per policy and composition over seeds, both datasets in one table, and the same per cell of the
+    sweep."""
     out = {}
-    for name, table in [("e21", "e3_by_policy"), ("e22", "e4_by_cell")]:
+    for name, table in [("e21", "e3_by_policy"), ("e24", "e3_by_policy"), ("e22", "e4_by_cell")]:
         if name in pooled and table in pooled[name]:
-            t = pooled[name][table].copy()
+            t = uniform(pooled[name][table], seeds.E3_COLUMNS if table == "e3_by_policy" else seeds.E4_COLUMNS)
             t.insert(0, "dataset", DATASETS[name])
-            out[table] = t
+            out[table] = pd.concat([out[table], t], ignore_index=True) if table in out else t
     return out
 
 
@@ -207,7 +217,7 @@ def e7_certification(folders: dict, audit_rate: float) -> pd.DataFrame:
 
 def e7_monitoring(folders: dict) -> pd.DataFrame:
     """E7 at the monitoring stage over seeds, the workload, the audits and the attacks let through of every policy
-    under each arm on the real streams, folders mapping a seed to an e21 or e23 run folder."""
+    under each arm on the real streams, folders mapping a seed to an e21, e23 or e24 run folder."""
     frames = {seed: workload.monitoring(folder) for seed, folder in folders.items()}
     keys = ["dataset", "stage", "stream", "composition", "policy", "arm"]
     pooled = seeds.pool(frames, keys)
