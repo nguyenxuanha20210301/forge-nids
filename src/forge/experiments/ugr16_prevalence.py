@@ -792,7 +792,10 @@ def fig_drift_by_window(run_dir) -> plt.Figure:
     ratios = {}
     for f in families:
         enough = windows[f].to_numpy() >= summary["min_family_attacks"]
-        ratios[f] = np.where(enough, windows[f"forge_miss_{f}"].to_numpy() / cal["miss"][f], np.nan)
+        # a family without a miss in the calibration part has no ratio, so its rate there is read as one miss over
+        # its calibration attacks, the smallest rate the part tells from zero, and the ratio shown is a floor
+        base = max(cal["miss"][f], 1 / summary["calibration_attacks"][f])
+        ratios[f] = np.where(enough, windows[f"forge_miss_{f}"].to_numpy() / base, np.nan)
     ratios["benign"] = (windows["forge_benign_dismissed"] / cal["benign_dismissed"]).to_numpy()
     # a window with no miss at the thresholds has a ratio of 0, which sits on the lower edge of the log axis
     shown = np.concatenate(list(ratios.values()))

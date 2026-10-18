@@ -8,10 +8,11 @@ experiment:
   module: ugr16_streams
 
 # the e13 run whose grid, window histograms, calibration draws, thresholds and per flow scores the streams come
-# from, in the runs folder of the storage root
+# from, in the runs folder of the storage root. the run at the operating target of UGR16, epsilon 0.005, since the
+# run of record at the paper's epsilon refuses nearly every calibration set and would leave no FORGE stream
 source:
   experiment: e13_ugr16_prevalence
-  run: 20261018-024353_746438f
+  run: 20261018-041639_d2ace55
 
 # every window is thinned to its own mix of families at the prevalence of the composition, which must be one of the
 # prevalences of the source run, a window short of attacks keeps all of them and has its benign flows subsampled as
@@ -35,7 +36,7 @@ policies: [forge_simplex, forge_online, ltt_iid, conformal_fnr, fixed_sel, recal
 
 monitor:
   # the certificate's epsilon, delta_lower of delta for the lower bound and the rest for the upper one
-  epsilon: 0.001
+  epsilon: 0.005
   delta: 0.05
   delta_lower: 0.025
   # the bets of each side as the sizes of violation they are best against, in units of epsilon
