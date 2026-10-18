@@ -72,12 +72,19 @@ TABLES = {
         "cells": (["name"], None),
         "policies": (["rate", "allocation", "floor", "bin"], None),
     },
+    "e24_ugr16_streams": {
+        "claims": (["stream", "policy", "composition", "arm"], "draws"),
+        "by_window": (["stream", "policy", "composition", "window", "start"], None),
+        "windows": (["window", "start"], None),
+    },
 }
 # the experiments of RQ1, whose pooled by_prevalence table gives the E1 table of their dataset
 PREVALENCE_EXPERIMENTS = ("e11_anoshift_prevalence", "e12_litnet_prevalence", "e13_ugr16_prevalence")
 # the experiments whose thresholds come from the source run of the same seed, so their configs differ in the run id
 # of the source by design and the pool checks the seed of that run instead
-SOURCE_PER_SEED = ("e21_monitor_streams", "e22_monitor_sweep")
+SOURCE_PER_SEED = ("e21_monitor_streams", "e22_monitor_sweep", "e24_ugr16_streams")
+# the experiments of RQ2 on real streams, whose pooled claims give the E3 table of their dataset
+STREAM_EXPERIMENTS = ("e21_monitor_streams", "e24_ugr16_streams")
 SOURCE_KEYS = ("source.run",)
 # the columns of the scorers table that stand beside the certified share in the E5 table
 E5_SCORER_COLUMNS = ["selection_yardstick", "selection_auc", "calibration_auc", "benign_at_miss_pooled",
@@ -396,7 +403,7 @@ def pool_experiment(experiment: str, root=None, out=None, ignore=(), first: str 
             tables["e6_windows"] = e6_windows_table(tables["windows"], summary)
     if experiment in ("e31_anoshift_scorers", "e32_litnet_scorers") and "by_epsilon" in tables:
         tables["e5_by_scorer"] = e5_table(tables["by_epsilon"], tables.get("scorers"), summary)
-    if experiment == "e21_monitor_streams" and "claims" in tables:
+    if experiment in STREAM_EXPERIMENTS and "claims" in tables:
         tables["e3_by_policy"] = e3_table(tables["claims"])
     if experiment == "e22_monitor_sweep" and "claims" in tables:
         tables["e4_by_cell"] = e4_table(tables["claims"])

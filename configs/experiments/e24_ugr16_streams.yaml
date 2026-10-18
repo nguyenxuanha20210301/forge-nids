@@ -1,0 +1,67 @@
+# RQ2 on UGR16, FORGE-Monitor and the baselines that read the same audits on the dismissed streams of the thresholds
+# of e13 through the 86 windows of six hours of August 2016 in order, with the attack prevalence moving as it did, how
+# soon a violation is found and how much leaks before the switch off
+inherit: [../base.yaml, ../data/ugr16.yaml]
+
+experiment:
+  name: e24_ugr16_streams
+  module: ugr16_streams
+
+# the e13 run whose grid, window histograms, calibration draws, thresholds and per flow scores the streams come
+# from, in the runs folder of the storage root
+source:
+  experiment: e13_ugr16_prevalence
+  run: 20261018-024353_746438f
+
+# every window is thinned to its own mix of families at the prevalence of the composition, which must be one of the
+# prevalences of the source run, a window short of attacks keeps all of them and has its benign flows subsampled as
+# the real windows of e13 do, and a window without attacks goes through at prevalence 0. natural keeps every window
+# as it was, all its flows at its own prevalence, so the stream sees the launched attacks stop, the spam surge and
+# fade and the daily cycle as they happened
+compositions:
+  - {name: typical, prevalence: 0.02}
+  - {name: worst, prevalence: 0.1}
+  - {name: natural}
+
+# the kinds of stream every policy and composition is monitored on, as in e21. simulated draws every dismissed flow
+# as an attack with the window's population FOR independently, replay keeps the flows of the window in their real
+# order from the per flow scores the source run saved, thinned to the composition, and dismisses them with their
+# real labels. the paper reads the replay
+streams: [simulated, replay]
+
+# the threshold policies whose dismissed streams are monitored, the five of e13 that e21 reads and the recalibration
+# of the fixed threshold on the escalated labels after every window
+policies: [forge_simplex, forge_online, ltt_iid, conformal_fnr, fixed_sel, recalibration]
+
+monitor:
+  # the certificate's epsilon, delta_lower of delta for the lower bound and the rest for the upper one
+  epsilon: 0.001
+  delta: 0.05
+  delta_lower: 0.025
+  # the bets of each side as the sizes of violation they are best against, in units of epsilon
+  lower_ratios: [1.5, 2, 3, 5, 10, 30, 100]
+  upper_ratios: [0, 0.25, 0.5, 0.75]
+  kind: thinning
+
+audits:
+  # the uniform audit probability of every dismissed flow
+  rate: 0.005
+
+# the segments of the sequence per week, the windows cut into stretches of this length from the start of the first
+# window, and a last stretch with fewer windows than this joined to the one before, so the two windows of August 29
+# run with the third week
+segments:
+  length: 7 days
+  minimum_windows: 4
+
+# the monitors on every stream, all reading the same audits, FORGE-Monitor with one sequence for the deployment, one
+# per week at the same delta, one per window at delta over the windows, and the any start rule of e22, a sequence
+# from every window at delta over the windows with the first alarm of any of them
+arms: [monitor, monitor_week, monitor_window, any_start, none, window_audit, naive]
+
+simulation:
+  # the draws are those of the source run, one stream per policy and composition. the figure over the stream shows
+  # the first draw of this policy and composition
+  trace: {policy: forge_simplex, composition: typical}
+  # the replay thins the draws of a window this many at a time, which fixes the random stream of the thinning
+  chunk: 100
