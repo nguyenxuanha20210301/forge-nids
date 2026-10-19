@@ -9,10 +9,12 @@ experiment:
 
 # the e13 run whose grid, window histograms, calibration draws, thresholds and per flow scores the streams come
 # from, in the runs folder of the storage root. the run at the operating target of UGR16, epsilon 0.005, since the
-# run of record at the paper's epsilon refuses nearly every calibration set and would leave no FORGE stream
+# run of record at the paper's epsilon refuses nearly every calibration set and would leave no FORGE stream, and at
+# the share start of the certificate, since at the feasible start the certificate refuses in 18 of 20 scorer seeds
+# and the stream of a refused threshold dismisses nothing. the seed 0 run of the batch of 20 at the share start
 source:
   experiment: e13_ugr16_prevalence
-  run: 20261018-041639_d2ace55
+  run: 20261019-015220_984f87d
 
 # every window is thinned to its own mix of families at the prevalence of the composition, which must be one of the
 # prevalences of the source run, a window short of attacks keeps all of them and has its benign flows subsampled as
