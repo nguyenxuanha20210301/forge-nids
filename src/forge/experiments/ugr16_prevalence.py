@@ -46,7 +46,7 @@ from matplotlib.patches import Patch
 from forge import runs
 from forge.certify.certificate import (certify, conformal_fnr, counts_below, family_groups, fixed_sequence,
                                        for_from_rates, grid_from, group_rows, ltt_iid, min_family_size,
-                                       online_certifier)
+                                       online_certifier, start_settings)
 from forge.data import splits, ugr16
 from forge.data.synthetic import draw_counts
 from forge.eval import windows as judge
@@ -215,7 +215,7 @@ def run(cfg: dict, run: runs.Run) -> None:
     d, sc, c, cc, dep, sim = (cfg["dataset"], cfg["scorer"], cfg["certify"], cfg["calibration"], cfg["deployment"],
                               cfg["simulation"])
     eps, delta, pi_max, part_b = c["epsilon"], c["delta"], c["pi_max"], c["delta_benign"]
-    start = {"start_misses": c["start_misses"], "start_slack": c["start_slack"]}
+    start = start_settings(c)
     pi_cal, prevalences, mixes = cc["prevalence"], dep["prevalences"], dep["mixes"]
     methods, draws = sim["methods"], sim["draws"]
     min_attacks = dep["min_family_attacks"]

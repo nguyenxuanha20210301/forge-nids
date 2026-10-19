@@ -59,8 +59,18 @@ certify:
   # goes to the miss rate bound of each attack family
   delta_benign: 0.025
   pi_max: 0.1
-  # the sequence starts at the loosest threshold that would pass with up to start_misses misses in every family, as
-  # long as it dismisses at most start_slack more than the first threshold that would pass with no miss
+  # where the sequence starts. feasible, the rule of the other datasets, is the loosest threshold that would pass
+  # with up to start_misses misses in every family, as long as it dismisses at most start_slack more than the first
+  # threshold that would pass with no miss. on UGR16 that threshold lies at 3% of the benign flows, where the
+  # smallest family can pass with two misses, and the Neris botnet, labelled by host, has more of its hosts'
+  # ordinary flows below it than the bound allows there in 18 of 20 scorer seeds, so the sequence fails at its first
+  # test, while every threshold from 20% to 64% of the benign flows passes in every seed. the selection part,
+  # certified on its own as if it were the calibration part, refuses at that start in every seed and certifies on
+  # AnoShift and LITNET, so the start moves here and nowhere else. share starts the sequence at the first threshold
+  # whose lower bound on the benign share dismissed reaches start_share, a threshold fixed by the benign counts
+  # alone before the calibration attacks are seen, as the feasible start is, so Theorem 1 holds as it stands
+  start: share
+  start_share: 0.5
   start_misses: 2
   start_slack: 0.05
   # LTT starts its sequence by the same rule, with attacks among the dismissed flows in place of misses and the share

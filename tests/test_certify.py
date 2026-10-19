@@ -106,6 +106,46 @@ def test_start_tolerates_misses_within_the_slack(fn):
         fn(below, n, attack, np.array(n_attack), **args, start_misses=-1)
 
 
+def test_share_start_begins_where_the_benign_bound_reaches_the_share():
+    # 10^6 benign flows at shares 0.1 to 1.0, one family of 10^4 attacks with 50 flows below every threshold, a tail
+    # among the lowest benign scores, and 2,000 below the last. the feasible start is the first threshold, where the
+    # bound allows 45 misses against a benign share of 0.1, so the sequence fails at its first test, while from any
+    # later threshold the same misses pass against a larger benign share until the last
+    below, n, attack, n_attack = np.arange(1, 11) * 100000, 1000000, np.array([[50] * 9 + [2000]]), np.array([10000])
+    args = dict(eps=5e-3, delta=0.05, pi_max=0.1)
+    assert certify(below, n, attack, n_attack, **args)["index"] == -1
+    share = below / n - dkw_margin(n, 0.025)
+    assert share[4] < 0.5 <= share[5]
+    for fn in (certify, certify_online):
+        assert fn(below, n, attack, n_attack, **args, start="share", start_share=0.5)["index"] == 8
+        # a share no lower bound reaches leaves no start, and the share must be given and lie inside (0, 1)
+        assert fn(below, n, attack, n_attack, **args, start="share", start_share=0.9999)["index"] == -1
+        for bad in (None, 0.0, 1.0, 1.5):
+            with pytest.raises(ValueError, match="start_share"):
+                fn(below, n, attack, n_attack, **args, start="share", start_share=bad)
+    # the pooled estimate and the score wrappers take the same start
+    at_pi = estimated_certifier(below[None, :], np.array([n]), attack, n_attack, 5e-3, 0.025, 0.025, start="share",
+                                start_share=0.5)
+    assert at_pi(np.array([0.1]))["index"] == [8]
+    grid = np.linspace(0.1, 1.0, 10)
+    benign_scores = np.repeat(grid, 100000) - 0.05
+    attack_scores = np.concatenate([np.full(50, 0.0), np.full(1950, 0.95), np.full(8000, 2.0)])
+    families = np.zeros(10000, dtype=int)
+    out = certify_scores(benign_scores, attack_scores, families, grid, **args, start="share", start_share=0.5)
+    assert out["index"] == 8
+
+
+def test_ltt_share_start_begins_at_the_dismissed_share():
+    # 600 attacks among the 100,600 flows dismissed at the first threshold, 0.006 of them, so the sequence from the
+    # first threshold that could pass with no attack fails at once, while from the share start at half of the
+    # 1,010,000 flows the same 600 attacks are 0.001 of the dismissed flows and every threshold passes
+    benign, attack, n = np.arange(1, 11) * 100000, np.full(10, 600), np.array(1010000)
+    assert ltt_iid(benign, attack, 5e-3, 0.05)["index"] == -1
+    assert ltt_iid(benign, attack, 5e-3, 0.05, n=n, start="share", start_share=0.5)["index"] == 9
+    with pytest.raises(ValueError, match="size n"):
+        ltt_iid(benign, attack, 5e-3, 0.05, start="share", start_share=0.5)
+
+
 def test_bound_takes_the_worst_family_at_the_whole_delta_m():
     benign_below, n_benign = np.array([1, 2, 3, 6, 9]) * 100000, 1000000
     families = np.array([[0, 1, 2, 3, 9], [0, 0, 0, 5, 30]])
@@ -299,6 +339,8 @@ def violation_shares(n, pi_cal, families, shares, pi_max, draws, seed):
         return np.where(index >= 0, rates, 0.0)
 
     forge = certify(d.benign_below, d.n_benign, d.family_below, d.n_family, eps, delta, pi_max)["index"]
+    share = certify(d.benign_below, d.n_benign, d.family_below, d.n_family, eps, delta, pi_max, start="share",
+                    start_share=0.1)["index"]
     ltt = ltt_iid(d.benign_below, d.family_below.sum(1), eps, delta)["index"]
     guarded = ltt_iid(d.benign_below, d.family_below.sum(1), eps, delta, n=d.n_benign + d.n_family.sum(1),
                       start_misses=2, start_slack=0.05)["index"]
@@ -308,6 +350,7 @@ def violation_shares(n, pi_cal, families, shares, pi_max, draws, seed):
         return np.where(index >= 0, for_from_rates(pi_cal, (np.array(shares) @ m)[safe], b[safe]), 0.0)
 
     return {"forge": np.mean(worst(forge, pi_max) > eps), "forge_refused": np.mean(forge < 0),
+            "forge_share": np.mean(worst(share, pi_max) > eps), "forge_share_refused": np.mean(share < 0),
             "ltt_iid": np.mean(at_calibration(ltt) > eps), "ltt_guarded": np.mean(at_calibration(guarded) > eps),
             "ltt_at_pi_max": np.mean(worst(ltt, pi_max) > eps)}
 
@@ -316,6 +359,8 @@ def test_violations_stay_below_delta_and_the_check_can_fail():
     shares = violation_shares(30000000, 0.02, FAMILIES, SHARES, 0.1, draws=1500, seed=6)
     assert shares["forge_refused"] < 0.5
     assert shares["forge"] <= 0.05
+    # the share start certifies from a tenth of the benign flows on and keeps the claim as well
+    assert shares["forge_share_refused"] < 0.5 and shares["forge_share"] <= 0.05
     assert shares["ltt_iid"] <= 0.05 and shares["ltt_guarded"] <= 0.05
     # the same simulation catches the i.i.d. baseline at a higher prevalence, so it is able to find a violation
     assert shares["ltt_at_pi_max"] > 0.5

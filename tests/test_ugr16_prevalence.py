@@ -5,7 +5,7 @@ import pytest
 
 from forge import experiments, runs
 from forge.certify.certificate import (certify, certify_online, conformal_fnr, counts_below, fixed_sequence,
-                                       for_from_rates, group_rows, ltt_iid)
+                                       for_from_rates, group_rows, ltt_iid, start_settings)
 from forge.config import load_config
 from forge.data import splits
 from forge.data.synthetic import draw_counts
@@ -204,7 +204,7 @@ def test_e13_tables_figures_and_window_rates(ugr16_signal, tmp_path):
     grouped = group_rows(cal.family_below, cal.n_family, hist["groups"])
     pooled_below, pooled_n = cal.family_below.sum(1), cal.n_family.sum(1)
     args = (EPS, c["delta"], PI_MAX, c["delta_benign"])
-    start = {"start_misses": c["start_misses"], "start_slack": c["start_slack"]}
+    start = start_settings(c)
     simplex = certify(cal.benign_below, cal.n_benign, *grouped, *args, **start)
     pooled = certify(cal.benign_below, cal.n_benign, pooled_below[:, None], pooled_n[:, None], *args, **start)
     assert np.array_equal(saved["forge_simplex_index"], simplex["index"])

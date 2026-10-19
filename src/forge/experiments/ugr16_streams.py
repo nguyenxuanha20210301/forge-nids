@@ -43,7 +43,7 @@ import pandas as pd
 from matplotlib.lines import Line2D
 
 from forge import runs
-from forge.certify.certificate import certify, for_from_rates, group_rows, online_certifier
+from forge.certify.certificate import certify, for_from_rates, group_rows, online_certifier, start_settings
 from forge.data.synthetic import draw_counts
 from forge.eval.metrics import share_with_interval
 from forge.eval.windows import rates
@@ -396,7 +396,7 @@ def run(cfg: dict, run: runs.Run) -> None:
                       b_cal, m_cal, draws)
     grouped_below, grouped_n = group_rows(cal.family_below, cal.n_family, hist["groups"])
     args = (eps, c["delta"], c["pi_max"], c["delta_benign"])
-    start = {"start_misses": c["start_misses"], "start_slack": c["start_slack"]}
+    start = start_settings(c)
     offline = certify(cal.benign_below, cal.n_benign, grouped_below, grouped_n, *args, **start)
     if not np.array_equal(offline["index"], sdraws["forge_simplex_index"]):
         raise ValueError("the calibration draws of the source run could not be reproduced")
