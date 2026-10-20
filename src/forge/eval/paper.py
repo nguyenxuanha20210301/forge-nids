@@ -13,12 +13,16 @@ import pandas as pd
 from forge import paths, runs
 from forge.eval import seeds, workload
 
-# the pooled folder of each experiment the paper reads, under pooled/ of the storage root
+# the pooled folder of each experiment the paper reads, under pooled/ of the storage root. e13_floor is e13 at the
+# paper's epsilon, where the certificate refuses, beside the operating target of UGR16
 EXPERIMENTS = {"e11": "e11_anoshift_prevalence", "e12": "e12_litnet_prevalence", "e13": "e13_ugr16_prevalence",
-               "e21": "e21_monitor_streams", "e22": "e22_monitor_sweep", "e23": "e23_unseen_family",
-               "e24": "e24_ugr16_streams", "e31": "e31_anoshift_scorers", "e32": "e32_litnet_scorers"}
-DATASETS = {"e11": "anoshift", "e12": "litnet2020", "e13": "ugr16", "e21": "anoshift", "e22": "anoshift",
-            "e23": "litnet2020", "e24": "ugr16", "e31": "anoshift", "e32": "litnet2020"}
+               "e13_floor": "e13_ugr16_floor", "e21": "e21_monitor_streams", "e22": "e22_monitor_sweep",
+               "e23": "e23_unseen_family", "e24": "e24_ugr16_streams", "e31": "e31_anoshift_scorers",
+               "e32": "e32_litnet_scorers"}
+DATASETS = {"e11": "anoshift", "e12": "litnet2020", "e13": "ugr16", "e13_floor": "ugr16", "e21": "anoshift",
+            "e22": "anoshift", "e23": "litnet2020", "e24": "ugr16", "e31": "anoshift", "e32": "litnet2020"}
+# the experiments whose rows make the E1 table, each row carrying the epsilon of its experiment
+E1_EXPERIMENTS = ("e11", "e12", "e13", "e13_floor")
 # the columns of the pooled tables that reach the paper, in their median, low, high and pooled forms
 E1_COLUMNS = ["violation_rate", "violation_window_max", "refused", "dismissed_mean", "for_median",
               "best_up_to_pi_max_dismissed", "best_at_prevalence_dismissed", "best_every_mix_dismissed",
@@ -81,28 +85,34 @@ def _keep(table: pd.DataFrame, first: list[str], columns) -> pd.DataFrame:
 
 def e1_table(pooled: dict) -> pd.DataFrame:
     """E1, the FOR, the violation share and the dismissed share of every method against the prevalence on the windows
-    RQ1 is read on, the three datasets in one table, every mix."""
+    RQ1 is read on, the three datasets in one table, every mix, each row with the epsilon of its experiment, so UGR16
+    at its operating target and at the paper's epsilon stand apart."""
     parts = []
-    for name in ("e11", "e12", "e13"):
+    for name in E1_EXPERIMENTS:
         if name not in pooled or "e1_for_by_prevalence" not in pooled[name]:
             continue
         t = uniform(pooled[name]["e1_for_by_prevalence"], E1_COLUMNS)
         t.insert(0, "dataset", DATASETS[name])
+        t.insert(1, "epsilon", settings(pooled[name], ["epsilon"])["epsilon"])
         # a share the seed never moved has no pooled form, and its one value is the share over every seed
         for col in E1_COLUMNS:
             if seeds._is_rate(col) and f"{col}_median" in t and f"{col}_pooled" not in t:
                 t[f"{col}_pooled"] = t[f"{col}_median"]
-        parts.append(_keep(t, ["dataset", "method", "mix", "prevalence", "main", "windows", "seeds"], E1_COLUMNS))
+        parts.append(_keep(t, ["dataset", "epsilon", "method", "mix", "prevalence", "main", "windows", "seeds"],
+                           E1_COLUMNS))
     if not parts:
-        raise ValueError("no E1 table in the pooled folders of e11, e12 and e13")
+        raise ValueError("no E1 table in the pooled folders of " + ", ".join(EXPERIMENTS[n] for n in E1_EXPERIMENTS))
     return pd.concat(parts, ignore_index=True)
 
 
-def e1_rows(table: pd.DataFrame, mix: str = "window") -> pd.DataFrame:
-    """the E1 table at one mix with the columns the figure over prevalences reads, the median over seeds as the
-    value, the 5% and 95% quantiles over seeds as its range, and the share of pairs with FOR above epsilon pooled
-    over the draws of every seed with the range of the per seed shares."""
-    t = table[table["mix"] == mix].copy()
+def e1_rows(table: pd.DataFrame, mix: str = "window", epsilon: float | None = None) -> pd.DataFrame:
+    """the E1 table at one mix, and at one epsilon when given, with the columns the figure over prevalences reads,
+    the median over seeds as the value, the 5% and 95% quantiles over seeds as its range, and the share of pairs with
+    FOR above epsilon pooled over the draws of every seed with the range of the per seed shares."""
+    t = table[table["mix"] == mix]
+    if epsilon is not None:
+        t = t[np.isclose(t["epsilon"], epsilon)]
+    t = t.copy()
     names = {"for_median_median": "for_median", "for_median_low": "for_low", "for_median_high": "for_high",
              "violation_rate_pooled": "violation_rate", "violation_rate_low": "violation_window_min",
              "violation_rate_high": "violation_window_max", "dismissed_mean_median": "dismissed_mean",

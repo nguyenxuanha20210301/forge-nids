@@ -32,9 +32,15 @@ def pooled_e1(dataset, methods, seeds=3):
     return pd.DataFrame(rows)
 
 
+def pooled_folder(e1: pd.DataFrame, epsilon=1e-3) -> dict:
+    # the pooled folder of an E1 experiment as read_pooled gives it, its E1 table and the summaries by seed
+    n = int(e1["seeds"].max())
+    return {"e1_for_by_prevalence": e1, "summary_by_seed": pd.DataFrame({"seed": range(n), "epsilon": [epsilon] * n})}
+
+
 def test_e1_table_and_rows_rename_the_pooled_forms(tmp_path):
-    pooled = {"e11": {"e1_for_by_prevalence": pooled_e1("anoshift", ["forge_simplex", "ltt_iid"])},
-              "e12": {"e1_for_by_prevalence": pooled_e1("litnet2020", ["forge_simplex", "forge_pooled", "ltt_iid"])}}
+    pooled = {"e11": pooled_folder(pooled_e1("anoshift", ["forge_simplex", "ltt_iid"])),
+              "e12": pooled_folder(pooled_e1("litnet2020", ["forge_simplex", "forge_pooled", "ltt_iid"]))}
     table = paper.e1_table(pooled)
     assert table["dataset"].tolist()[:8] == ["anoshift"] * 8 and len(table) == 8 + 12
     assert "for_median_median" in table and "best_at_prevalence_dismissed_low" in table
@@ -224,8 +230,8 @@ def test_e7_monitoring_over_two_seeds_and_the_e3_tables(tmp_path):
 
 
 def test_the_tables_take_the_third_dataset():
-    pooled = {"e11": {"e1_for_by_prevalence": pooled_e1("anoshift", ["forge_simplex"])},
-              "e13": {"e1_for_by_prevalence": pooled_e1("ugr16", ["forge_simplex", "ltt_iid"])}}
+    pooled = {"e11": pooled_folder(pooled_e1("anoshift", ["forge_simplex"])),
+              "e13": pooled_folder(pooled_e1("ugr16", ["forge_simplex", "ltt_iid"]), 0.005)}
     table = paper.e1_table(pooled)
     assert table["dataset"].tolist() == ["anoshift"] * 4 + ["ugr16"] * 8
     # the E2 tables name a window of LITNET by its segment and one of UGR16 by its start
@@ -253,8 +259,9 @@ def test_e1_table_lines_up_one_seed_with_many():
     one = pooled_e1("ugr16", ["forge_simplex", "ltt_iid"], seeds=1)
     plain = {c: c[:-len("_median")] for c in one.columns if c.endswith("_median")}
     one = one.rename(columns=plain).drop(columns=[c for c in one.columns if c.endswith(("_low", "_high", "_pooled"))])
-    pooled = {"e11": {"e1_for_by_prevalence": pooled_e1("anoshift", ["forge_simplex"])},
-              "e13": {"e1_for_by_prevalence": one}}
+    pooled = {"e11": pooled_folder(pooled_e1("anoshift", ["forge_simplex"])),
+              "e13": {"e1_for_by_prevalence": one,
+                      "summary_by_seed": pd.DataFrame({"seed": [0], "epsilon": [0.005]})}}
     table = paper.e1_table(pooled)
     assert table.columns.is_unique and "for_median" not in table and "violation_rate_pooled" in table
     rows = paper.e1_rows(table[table["dataset"] == "ugr16"], "window")
@@ -262,6 +269,24 @@ def test_e1_table_lines_up_one_seed_with_many():
     r = rows[(rows["method"] == "ltt_iid") & (rows["prevalence"] == 0.1)].iloc[0]
     assert r["violation_rate"] == pytest.approx(0.01) and r["for_low"] == r["for_median"] == r["for_high"]
     assert r["dismissed_low"] == r["dismissed_mean"] == pytest.approx(0.45)
+
+
+def test_e1_table_carries_the_epsilon_of_every_experiment():
+    # UGR16 at its operating target and at the paper's epsilon, where the certificate refuses, stand apart in one
+    # table, and the rows of the figure keep the operating target
+    pooled = {"e11": pooled_folder(pooled_e1("anoshift", ["forge_simplex"])),
+              "e13": pooled_folder(pooled_e1("ugr16", ["forge_simplex", "ltt_iid"]), 0.005),
+              "e13_floor": pooled_folder(pooled_e1("ugr16", ["forge_simplex", "ltt_iid"]), 0.001)}
+    table = paper.e1_table(pooled)
+    assert table.columns[:3].tolist() == ["dataset", "epsilon", "method"]
+    assert table.groupby(["dataset", "epsilon"]).size().to_dict() == {("anoshift", 0.001): 4, ("ugr16", 0.001): 8,
+                                                                      ("ugr16", 0.005): 8}
+    ugr16 = table[table["dataset"] == "ugr16"]
+    rows = paper.e1_rows(ugr16, "window", 0.005)
+    assert len(rows) == 4 and (rows["epsilon"] == 0.005).all() and len(paper.e1_rows(ugr16, "window")) == 8
+    assert paper.EXPERIMENTS["e13_floor"] == "e13_ugr16_floor" and paper.DATASETS["e13_floor"] == "ugr16"
+    with pytest.raises(ValueError, match="no E1 table in the pooled folders of e11_anoshift_prevalence"):
+        paper.e1_table({"e21": {}})
 
 
 def test_e7_monitoring_reads_the_windows_of_ugr16(tmp_path):

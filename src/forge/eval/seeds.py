@@ -20,6 +20,17 @@ import pandas as pd
 from forge import paths, runs
 
 LOW, HIGH = 0.05, 0.95
+# the tables of e13, which its run at the paper's epsilon shares
+E13_TABLES = {
+    "by_prevalence": (["arm", "subset", "method", "prevalence", "mix"], "pairs"),
+    "claims": (["arm", "window", "start", "method", "prevalence", "mix"], "draws"),
+    "natural": (["arm", "window", "start", "method"], "draws"),
+    "estimates": (["arm", "window", "start", "prevalence", "mix", "natural"], "draws"),
+    "windows": (["window", "start"], None),
+    "roles": (["role"], None),
+    "unseen_udpscan": (["family", "method"], "thresholds"),
+    "unseen_sshscan": (["family", "method"], "thresholds"),
+}
 # the tables of each experiment, with the columns that identify a row within one run and the column that weights
 # a share of draws when it is pooled over seeds
 TABLES = {
@@ -36,16 +47,9 @@ TABLES = {
         "estimates": (["arm", "window", "segment", "prevalence", "mix", "natural"], "draws"),
         "windows": (["window", "segment"], None),
     },
-    "e13_ugr16_prevalence": {
-        "by_prevalence": (["arm", "subset", "method", "prevalence", "mix"], "pairs"),
-        "claims": (["arm", "window", "start", "method", "prevalence", "mix"], "draws"),
-        "natural": (["arm", "window", "start", "method"], "draws"),
-        "estimates": (["arm", "window", "start", "prevalence", "mix", "natural"], "draws"),
-        "windows": (["window", "start"], None),
-        "roles": (["role"], None),
-        "unseen_udpscan": (["family", "method"], "thresholds"),
-        "unseen_sshscan": (["family", "method"], "thresholds"),
-    },
+    "e13_ugr16_prevalence": E13_TABLES,
+    # e13 at the paper's epsilon, where the certificate refuses, pooled on its own by the rule of e13
+    "e13_ugr16_floor": E13_TABLES,
     "e23_unseen_family": {
         "claims": (["stream", "unit", "case", "composition", "policy", "arm"], "draws"),
         "blocks": (["stream", "unit", "case", "composition", "policy", "window", "segment"], None),
@@ -81,7 +85,11 @@ TABLES = {
     },
 }
 # the experiments of RQ1, whose pooled by_prevalence table gives the E1 table of their dataset
-PREVALENCE_EXPERIMENTS = ("e11_anoshift_prevalence", "e12_litnet_prevalence", "e13_ugr16_prevalence")
+PREVALENCE_EXPERIMENTS = ("e11_anoshift_prevalence", "e12_litnet_prevalence", "e13_ugr16_prevalence",
+                          "e13_ugr16_floor")
+# the experiments of RQ1 with windows of one family or one stretch of the clock, whose pooled claims and natural
+# windows give the E2 tables
+WINDOW_EXPERIMENTS = ("e12_litnet_prevalence", "e13_ugr16_prevalence", "e13_ugr16_floor")
 # the experiments whose thresholds come from the source run of the same seed, so their configs differ in the run id
 # of the source by design and the pool checks the seed of that run instead
 SOURCE_PER_SEED = ("e21_monitor_streams", "e22_monitor_sweep", "e24_ugr16_streams")
@@ -393,7 +401,7 @@ def pool_experiment(experiment: str, root=None, out=None, ignore=(), first: str 
         tables[name] = pool(frames, keys, weight)
     if experiment in PREVALENCE_EXPERIMENTS and "by_prevalence" in tables:
         tables["e1_for_by_prevalence"] = e1_table(tables["by_prevalence"], summary, experiment)
-    if experiment in ("e12_litnet_prevalence", "e13_ugr16_prevalence"):
+    if experiment in WINDOW_EXPERIMENTS:
         if "claims" in tables:
             tables["e2_by_family"] = e2_table(tables["claims"], summary)
         if "natural" in tables:

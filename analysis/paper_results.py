@@ -1,5 +1,5 @@
-"""the tables and figures of the paper over seeds, from the pooled tables of e11, e12, e13, e21, e22, e23, e24, e31
-and e32 and the run folders of their seeds.
+"""the tables and figures of the paper over seeds, from the pooled tables of e11, e12, e13, e13 at the paper's
+epsilon, e21, e22, e23, e24, e31 and e32 and the run folders of their seeds.
 
     python analysis/paper_results.py
     python analysis/paper_results.py --out results --e21 20261014-232506_44dd25a --audit-rate 0.005
@@ -51,7 +51,7 @@ def tables_of(pooled: dict, args) -> dict:
         row.update({"seeds": len(listed), "first_run": listed["run_id"].min(), "last_run": listed["run_id"].max()})
         settings.append(row)
     out["settings"] = pd.DataFrame(settings)
-    if any(name in pooled for name in ("e11", "e12", "e13")):
+    if any(name in pooled for name in paper.E1_EXPERIMENTS):
         out["e1_for_by_prevalence"] = paper.e1_table(pooled)
     out.update(paper.e2_tables(pooled))
     out.update(paper.e3_tables(pooled))
@@ -91,13 +91,15 @@ def draw(tables: dict, folder: Path) -> list[str]:
     if "e1_for_by_prevalence" in read:
         t = read["e1_for_by_prevalence"]
         rows = []
+        # one row per dataset at its operating target, so UGR16 at the paper's epsilon stays in the table only
         for name in ("e11", "e12", "e13"):
             experiment = paper.EXPERIMENTS[name]
             dataset = paper.DATASETS[name]
             if experiment not in settings.index or dataset not in set(t["dataset"]):
                 continue
             s = settings.loc[experiment]
-            rows.append({"data": paper.e1_rows(t[t["dataset"] == dataset], "window"), "dataset": dataset,
+            data = paper.e1_rows(t[t["dataset"] == dataset], "window", float(s["epsilon"]))
+            rows.append({"data": data, "dataset": dataset,
                          "summary": {k: float(s[k]) for k in ("epsilon", "delta", "calibration_prevalence", "pi_max")},
                          "label": figures.DATASET_LABELS[dataset]})
         if rows:

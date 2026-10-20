@@ -11,6 +11,8 @@ from forge.eval import seeds
 from forge.paths import configs_dir
 
 from test_litnet_prevalence import OVERRIDES, run_e12
+from test_ugr16_prevalence import OVERRIDES as E13_OVERRIDES
+from test_ugr16_prevalence import run_e13
 
 
 def fake_run(root, experiment, run_id, cfg, status="done", tables=(), arrays=(), summary=None):
@@ -349,3 +351,21 @@ def test_pool_e21_and_e22_tables_and_check_the_seed_of_the_source_run(tmp_path):
     assert np.isclose(e4.loc["main", "alarm_rate_pooled"], 0.925)
     assert np.isclose(e4.loc["main", "leak_median_median"], 2950.0) and e4.loc["main", "sequences"] == 6
     assert tables["cells"]["rate"].tolist() == [0.005, 0.01] and len(tables["policies"]) == 2
+
+
+def test_e13_floor_is_e13_at_the_paper_epsilon_and_pools_under_its_own_name(ugr16_signal, tmp_path):
+    folder = configs_dir() / "experiments"
+    floor = load_config(folder / "e13_ugr16_floor.yaml")
+    assert seeds.config_differences([floor, load_config(folder / "e13_ugr16_prevalence.yaml")]) == {
+        "certify.epsilon": ["0.001", "0.005"], "experiment.name": ["'e13_ugr16_floor'", "'e13_ugr16_prevalence'"]}
+    assert floor["certify"]["start"] == "share" and floor["experiment"]["module"] == "ugr16_prevalence"
+    # a run of it lands under its own name and pools on its own by the rule of e13, apart from the runs of e13
+    cfg = load_config(folder / "e13_ugr16_floor.yaml",
+                      E13_OVERRIDES + ["simulation.methods=[forge_simplex, ltt_iid]"])
+    run, _ = run_e13(cfg, tmp_path / "runs")
+    assert run.dir.parent.name == "e13_ugr16_floor"
+    tables = seeds.pool_experiment("e13_ugr16_floor", tmp_path / "runs", log=lambda s: None)
+    assert {"e1_for_by_prevalence", "e2_by_family", "e2_natural", "unseen_udpscan", "roles"} <= set(tables)
+    assert set(tables["e1_for_by_prevalence"]["method"]) == {"forge_simplex", "ltt_iid"}
+    with pytest.raises(ValueError, match="no finished run"):
+        seeds.pool_experiment("e13_ugr16_prevalence", tmp_path / "runs", log=lambda s: None)

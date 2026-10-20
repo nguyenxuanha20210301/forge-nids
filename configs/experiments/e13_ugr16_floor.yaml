@@ -1,0 +1,16 @@
+# RQ1 on UGR'16 at the paper's epsilon, e13 as it is with epsilon 0.001, so that the refusal of the certificate over
+# scorer seeds is read at the share start and cannot be laid on the start. its runs land under their own name and
+# pool on their own, apart from the operating target of e13
+inherit: [e13_ugr16_prevalence.yaml]
+
+experiment:
+  name: e13_ugr16_floor
+  module: ugr16_prevalence
+
+certify:
+  # the paper's epsilon, at which the run of record 20261018-024353_746438f refused 0.973 of the calibration sets at
+  # the feasible start. the Neris botnet is labelled by host and part of its flows is the hosts' ordinary traffic, so
+  # its miss rate grows with the benign share dismissed and its FOR at pi_max has a floor within a fifth of this
+  # epsilon, which no bound on its 10,740 calibration flows fits under. the certificate refuses most or all
+  # calibration sets of every seed from any start, so no e24 runs on these runs
+  epsilon: 0.001
