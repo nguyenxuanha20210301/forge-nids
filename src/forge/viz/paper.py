@@ -14,6 +14,7 @@ from forge.experiments.litnet_prevalence import EVERY_LINE, LABELS, MARKERS, MET
 from forge.experiments.monitor_streams import POLICY_LABELS, _policy_line
 from forge.experiments.scorer_comparison import _line as scorer_line
 from forge.experiments.unseen_family import ARM_LABELS, _arm_line
+from forge.eval.inference import OPERATING_ARMS
 from forge.eval.paper import paper_rows
 from forge.viz import layout, prevalence, style
 from forge.viz.prevalence import BEST_LINES
@@ -26,9 +27,8 @@ DATASET_UNITS = {"anoshift": "sessions", "litnet2020": "flows", "ugr16": "flows"
 YARDSTICK_LINES = {name: (dash, label) for name, dash, label in [*BEST_LINES, EVERY_LINE]}
 # the arms of E6 the paper shows, the one sequence, a sequence from every window, the per window audit and none
 E6_ARMS = ["monitor", "monitor_any", "window_audit", "none"]
-# the monitoring arm of E7 per dataset, the operating rule of the paper, a sequence per year where the stream has
-# years, per clock week where it has weeks, and one sequence from the start of the deployment where it has neither
-E7_MONITOR_ARMS = {"anoshift": "monitor_year", "litnet2020": "monitor", "ugr16": "monitor_week"}
+# the monitoring arm of E7 per dataset, the operating rule of the paper
+E7_MONITOR_ARMS = OPERATING_ARMS
 
 
 def _method_line(method: str) -> dict:
