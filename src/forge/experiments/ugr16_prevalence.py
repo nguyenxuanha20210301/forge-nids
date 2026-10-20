@@ -19,7 +19,8 @@ a LightGBM scorer is trained on the training part and stopped early on the selec
 quantiles of the selection part and a few deeper levels, the calibration part keeps all its benign flows and has its
 attacks thinned to the calibration prevalence with one common cap on every family, and each draw is a calibration set
 of that size drawn with replacement from it, as in e12. the fixed threshold and the beta of conformal FNR read the
-selection part at the same mix.
+selection part at the same mix, and their sequence begins where the certificate's does, at the first threshold under
+the feasible start and at the first threshold whose selection benign share reaches the share under the share start.
 
 every window comes in three arms, as in e12.
     reference   the benign count, prevalence and mix of the window with the score distributions of the calibration
@@ -44,9 +45,9 @@ import pandas as pd
 from matplotlib.patches import Patch
 
 from forge import runs
-from forge.certify.certificate import (certify, conformal_fnr, counts_below, family_groups, fixed_sequence,
-                                       for_from_rates, grid_from, group_rows, ltt_iid, min_family_size,
-                                       online_certifier, start_settings)
+from forge.certify.certificate import (certify, conformal_fnr, counts_below, family_groups, first_index,
+                                       fixed_sequence, for_from_rates, grid_from, group_rows, ltt_iid,
+                                       min_family_size, online_certifier, start_settings)
 from forge.data import splits, ugr16
 from forge.data.synthetic import draw_counts
 from forge.eval import windows as judge
@@ -207,6 +208,17 @@ def unseen_table(family: str, below: np.ndarray, n: int, offline: dict, natural:
     return pd.DataFrame(rows)
 
 
+def baseline_start(b_sel: np.ndarray, start: dict) -> int:
+    """the grid index where the sequence of the fixed threshold begins, where the certificate's begins, so a few
+    attacks among the lowest benign scores stop no method before its start. the first threshold under the feasible
+    and the strictest start, since they only skip thresholds where a bound with a few misses cannot pass and the plug
+    in rate has no bound, and the first threshold whose selection benign share reaches the share under the share
+    start, the length of the grid when none does."""
+    if start["start"] == "share":
+        return int(first_index(np.asarray(b_sel) >= start["start_share"]))
+    return 0
+
+
 def _counts(family: str, names: list[str]) -> str:
     return ", ".join(f"{f} {n}" for f, n in names) if names else "none"
 
@@ -326,12 +338,15 @@ def run(cfg: dict, run: runs.Run) -> None:
     if (sel_counts["sizes"][1:][shares_cal > 0] == 0).any():
         raise ValueError("a family of the calibration mix has no attack in the selection part")
 
-    # the two baselines tuned on the selection part at the calibration prevalence and mix
+    # the two baselines tuned on the selection part at the calibration prevalence and mix, from where the certificate
+    # and LTT begin
     m_sel = shares_cal @ m_sel_family
-    fixed = int(fixed_sequence(for_from_rates(pi_cal, m_sel, b_sel) <= eps, 0))
+    fixed_start = baseline_start(b_sel, start)
+    fixed = int(fixed_sequence(for_from_rates(pi_cal, m_sel, b_sel) <= eps, fixed_start))
     beta = float(m_sel[fixed]) if fixed >= 0 else 0.0
-    run.log(f"fixed threshold dismisses benign share {b_sel[fixed] if fixed >= 0 else 0.0:.4f} of the selection part "
-            f"with miss rate {beta:.5f} at the calibration mix, which conformal FNR takes as beta")
+    run.log(f"fixed threshold, its sequence from grid index {fixed_start} of {len(grid)}, dismisses benign share "
+            f"{b_sel[fixed] if fixed >= 0 else 0.0:.4f} of the selection part with miss rate {beta:.5f} at the "
+            "calibration mix, which conformal FNR takes as beta")
 
     # one stream for the calibration sets, one for each window, prevalence and mix of each arm in the order of ARMS,
     # whether the window has that arm or not, then one for each window at its own prevalence
@@ -664,7 +679,8 @@ def run(cfg: dict, run: runs.Run) -> None:
         "calibration_prevalence": pi_cal, "calibration_mix": cc["mix"], "calibration_sessions": n_cal,
         "calibration_attacks": dict(zip(families, n_attack_cal.tolist())),
         "calibration_expected_attacks": dict(zip(families, expected.tolist())),
-        "fixed_index": fixed, "beta": beta, "prevalences": prevalences, "main_prevalence": main, "arms": ARMS,
+        "fixed_start": fixed_start, "fixed_index": fixed, "beta": beta, "prevalences": prevalences,
+        "main_prevalence": main, "arms": ARMS,
         "mixes": mixes, "subsample_benign": dep["subsample_benign"], "skipped": skipped, "methods": methods,
         "draws": draws, "windows": len(windows), "empty_windows": empty, "windows_without_attacks": without_attacks,
         "offline_refused": {m: float(np.mean(out["index"] < 0)) for m, out in offline.items()},

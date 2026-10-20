@@ -188,10 +188,14 @@ def test_e13_tables_figures_and_window_rates(ugr16_signal, tmp_path):
     assert np.allclose(list(summary["calibration_expected_attacks"].values()), n_cal * PI_CAL * shares_cal)
     assert hist["groups"].tolist() == [0, 0, 1, 2, 3]
 
-    # the baselines tuned on the selection part read it at the calibration mix
+    # the baselines tuned on the selection part read it at the calibration mix, their sequence from the first
+    # threshold whose selection benign share reaches the share of the config's start
     b_sel, m_sel, _ = cdfs(hist["selection_benign_below"], hist["selection_family_below"], hist["selection_sizes"])
-    fixed = int(fixed_sequence(for_from_rates(PI_CAL, shares_cal @ m_sel, b_sel) <= EPS, 0))
-    assert fixed >= 0 and summary["fixed_index"] == fixed
+    assert c["start"] == "share" and summary["start"] == "share"
+    fixed_start = int(np.argmax(b_sel >= c["start_share"]))
+    assert b_sel[fixed_start] >= c["start_share"] > b_sel[fixed_start - 1] and summary["fixed_start"] == fixed_start
+    fixed = int(fixed_sequence(for_from_rates(PI_CAL, shares_cal @ m_sel, b_sel) <= EPS, fixed_start))
+    assert fixed >= fixed_start and summary["fixed_index"] == fixed
     assert np.isclose(summary["beta"], (shares_cal @ m_sel)[fixed])
 
     # the calibration sets and every certificate follow from the saved counts and the documented streams, one for the
@@ -492,6 +496,39 @@ def test_e13_tables_figures_and_window_rates(ugr16_signal, tmp_path):
     again, _ = run_e13(cfg, tmp_path / "again")
     assert runs.load_table(again.dir, "claims").equals(claims)
     assert np.array_equal(runs.load_arrays(again.dir, "scores")["score"], scores["score"])
+
+
+def test_baseline_start_follows_the_certificate_start():
+    # attacks among the lowest benign scores stop the plug in sequence of the fixed threshold at its first test, as
+    # the attacks below the first benign quantile of the selection part of UGR16 do, and the share start passes them by
+    b = np.array([0.02, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95])
+    m = np.array([0.006, 0.006, 0.006, 0.006, 0.01, 0.02, 0.5])
+    passes = for_from_rates(0.02, m, b) <= 0.005
+    assert passes.tolist() == [False, True, True, True, True, True, False]
+    for start in ({"start": "feasible"}, {"start": "strictest"}):
+        assert e13.baseline_start(b, start) == 0 and fixed_sequence(passes, 0) == -1
+    share = e13.baseline_start(b, {"start": "share", "start_share": 0.5})
+    assert share == 3 and fixed_sequence(passes, share) == 5
+    # a share no threshold reaches leaves nothing to start from, so the fixed threshold refuses
+    none = e13.baseline_start(b, {"start": "share", "start_share": 0.99})
+    assert none == len(b) and fixed_sequence(passes, none) == -1
+
+
+def test_e13_fixed_threshold_starts_at_the_first_threshold_under_the_feasible_start(ugr16_signal, tmp_path):
+    # the start of the other datasets leaves the fixed threshold and the conformal level where they were before the
+    # share start, the sequence from the first threshold
+    feasible = load_config(configs_dir() / "experiments" / "e13_ugr16_prevalence.yaml",
+                           OVERRIDES + ["certify.start=feasible",
+                                        "simulation.methods=[forge_simplex, ltt_iid, conformal_fnr, fixed_sel]"])
+    run, _ = run_e13(feasible, tmp_path / "feasible")
+    summary = runs.load_json(run.dir, "summary")
+    hist = runs.load_arrays(run.dir, "histograms")
+    saved = runs.load_arrays(run.dir, "draws")
+    b_sel, m_sel, _ = cdfs(hist["selection_benign_below"], hist["selection_family_below"], hist["selection_sizes"])
+    m = hist["shares"] @ m_sel
+    first = int(fixed_sequence(for_from_rates(PI_CAL, m, b_sel) <= EPS, 0))
+    assert summary["start"] == "feasible" and summary["fixed_start"] == 0 and summary["fixed_index"] == first
+    assert np.isclose(summary["beta"], m[first]) and (saved["fixed_sel_index"] == first).all()
 
 
 def test_e13_checks_its_config(ugr16_signal, tmp_path):
