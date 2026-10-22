@@ -38,8 +38,16 @@ what each method claims.
                     most, adjusted classify and count, the obvious alternative to a worst case pi_max
     ltt_upper       the FOR at every prevalence up to an upper confidence bound on the window's prevalence from the
                     same estimate, valid under label shift with the calibration mix, see forge.certify.certificate
+    conformal_selection
+                    a share of attacks among the dismissed sessions of a window of at most epsilon on average, Jin and
+                    Candès with the window's sessions as the test set, valid while the window is exchangeable with the
+                    calibration set, at its prevalence and mix
     conformal_fnr   a miss rate of at most beta on average over the calibration draw, with beta the miss rate of the
                     fixed threshold in the selection year
+    sahin_mert      the same at the beta Şahin and Mert published, fnr_level of the config, whose alpha splits the
+                    escalated sessions between the analysts and automatic escalation and leaves the dismissed ones
+    np_umbrella     a miss rate of at most fnr_level with probability 1 - delta over the calibration draw, the
+                    Neyman-Pearson umbrella of Tong, Feng and Li
     fixed_sel       nothing, the loosest threshold whose FOR at the calibration prevalence, estimated on the selection
                     year, stays at or below epsilon
 
@@ -65,9 +73,9 @@ import numpy as np
 import pandas as pd
 
 from forge import runs
-from forge.certify.certificate import (ESTIMATE_RULES, certify, conformal_fnr, estimate_prevalence,
-                                       estimated_certifier, family_groups, grid_from, group_rows, ks_threshold,
-                                       ltt_iid, min_family_size, online_certifier, plug_in)
+from forge.certify.certificate import (ESTIMATE_RULES, certify, conformal_fnr, conformal_selection,
+                                       estimate_prevalence, estimated_certifier, family_groups, grid_from, group_rows,
+                                       ks_threshold, ltt_iid, min_family_size, np_umbrella, online_certifier, plug_in)
 from forge.data import anoshift, splits
 from forge.data.synthetic import draw_counts
 from forge.eval import windows as judge
@@ -79,21 +87,28 @@ from forge.viz import layout, prevalence, style
 from forge.viz.export import save_figure
 from forge.viz.prevalence import BEST_LINES
 
-METHODS = ["forge_simplex", "forge_online", "ltt_iid", "ltt_plugin", "ltt_upper", "conformal_fnr", "fixed_sel"]
+METHODS = ["forge_simplex", "forge_online", "ltt_iid", "ltt_plugin", "ltt_upper", "conformal_selection",
+           "conformal_fnr", "sahin_mert", "np_umbrella", "fixed_sel"]
 LABELS = {
     "forge_simplex": "FORGE offline, Theorem 1",
     "forge_online": "FORGE online, Theorem 1b",
     "ltt_iid": "LTT, i.i.d.",
     "ltt_plugin": "LTT at the estimated prevalence, plug in",
     "ltt_upper": "LTT at the estimated prevalence, upper bound",
+    "conformal_selection": "conformal selection, Jin and Candès",
     "conformal_fnr": "conformal FNR, Şahin and Mert",
+    "sahin_mert": "Şahin and Mert at their published β",
+    "np_umbrella": "Neyman-Pearson umbrella at the same β",
     "fixed_sel": "fixed threshold, selection year",
 }
-# the two methods at an estimated prevalence share the color of LTT and differ by their markers
+# the two methods at an estimated prevalence and conformal selection share the color of LTT, the two baselines at a
+# published miss rate the color of conformal FNR, and they differ by their markers
 MARKERS = {"forge_simplex": "o", "forge_online": "v", "ltt_iid": "^", "ltt_plugin": "<", "ltt_upper": ">",
-           "conformal_fnr": "p", "fixed_sel": "X"}
+           "conformal_selection": "P", "conformal_fnr": "p", "sahin_mert": "h", "np_umbrella": "d",
+           "fixed_sel": "X"}
 # the methods with a threshold per draw and window, and the name their saved arrays carry
-PER_WINDOW = {"forge_online": "online", "ltt_plugin": "plugin", "ltt_upper": "upper"}
+PER_WINDOW = {"forge_online": "online", "ltt_plugin": "plugin", "ltt_upper": "upper",
+              "conformal_selection": "selection"}
 ESTIMATED = ["ltt_plugin", "ltt_upper"]
 ROLES = ["train", "selection", "calibration", "deployment"]
 # the mix of attack types in a window, the block's own mix, the mix of the calibration set, or one attack type alone
@@ -251,6 +266,26 @@ def log_estimates(table: pd.DataFrame, estimate: dict, main: float, log) -> None
         log(f"estimated prevalence, {arm} windows, {mix} mix, at prevalence {main}, " + ", ".join(parts))
 
 
+def published_baselines(c: dict, delta: float, methods: list, pooled_below, pooled_n, floor) -> dict:
+    """the two baselines on the miss rate at fnr_level of the certify section, Şahin and Mert at their published beta
+    on average over the calibration draw and the Neyman-Pearson umbrella at the same level with probability 1 - delta,
+    so that the two differ by the kind of bound alone, each where the run lists it."""
+    out = {}
+    if "sahin_mert" in methods:
+        out["sahin_mert"] = {"index": conformal_fnr(pooled_below, pooled_n, c["fnr_level"]), "floor": floor}
+    if "np_umbrella" in methods:
+        out["np_umbrella"] = {"index": np_umbrella(pooled_below, pooled_n, c["fnr_level"], delta), "floor": floor}
+    return out
+
+
+def selection_methods(methods: list, window_below, n_window, attack_below, n_cal, eps) -> dict:
+    # conformal selection on one set of drawn windows with epsilon as its level, nothing where the run leaves it out
+    if "conformal_selection" not in methods:
+        return {}
+    index = conformal_selection(window_below, n_window, attack_below, n_cal, eps)
+    return {"conformal_selection": {"index": index, "floor": np.full(index.shape, np.nan)}}
+
+
 def run(cfg: dict, run: runs.Run) -> None:
     d, sc, c, dep, sim = cfg["dataset"], cfg["scorer"], cfg["certify"], cfg["deployment"], cfg["simulation"]
     eps, delta, pi_max, part = c["epsilon"], c["delta"], c["pi_max"], c["delta_benign"]
@@ -368,7 +403,10 @@ def run(cfg: dict, run: runs.Run) -> None:
                     "floor": no_floor},
         "conformal_fnr": {"index": conformal_fnr(pooled_below, pooled_n, beta), "floor": no_floor},
         "fixed_sel": {"index": np.full(draws, fixed), "floor": no_floor},
+        **published_baselines(c, delta, methods, pooled_below, pooled_n, no_floor),
     }
+    # conformal selection counts every flow of a calibration set in its p values
+    n_flows = cal.n_benign + cal.n_family.sum(1)
     for method, out in offline.items():
         hit = out["index"] >= 0
         run.log(f"{method}, refused in {np.mean(~hit):.3f} of calibration sets, mean benign share dismissed in the "
@@ -400,6 +438,7 @@ def run(cfg: dict, run: runs.Run) -> None:
     online_floor = {arm: np.zeros(shape, dtype=np.float32) for arm in ARMS}
     estimated_index = {arm: {m: np.full(shape, -1, dtype=np.int16) for m in estimate["methods"]} for arm in ARMS}
     estimated_pi = {arm: {m: np.zeros(shape, dtype=np.float32) for m in estimate["methods"]} for arm in ARMS}
+    selection_index = {arm: np.full(shape, -1, dtype=np.int16) for arm in ARMS}
     offset = {"real": 1, "reference": 1 + cells}
     for i, win in enumerate(windows):
         b_w, m_w_family, _, shares_w = rates(win)
@@ -435,8 +474,12 @@ def run(cfg: dict, run: runs.Run) -> None:
                     if estimated:
                         estimate_rows.append({**cell, "window_sessions": n_w, "draws": draws,
                                               **estimate_summary(estimated, pi)})
+                    selected = selection_methods(methods, window_below, np.full(draws, n_w), pooled_below, n_flows,
+                                                 eps)
+                    if selected:
+                        selection_index[arm][i, j, k] = selected["conformal_selection"]["index"]
                     m = shares @ m_family
-                    rows += evaluate(methods, offline, {"forge_online": online, **per_window}, pi, m, b,
+                    rows += evaluate(methods, offline, {"forge_online": online, **per_window, **selected}, pi, m, b,
                                      attack_below, window_below, eps, values,
                                      {**cell, "window_sessions": n_w, "draws": draws,
                                       **best_thresholds(pi, pi_max, m, b, eps)})
@@ -562,6 +605,9 @@ def run(cfg: dict, run: runs.Run) -> None:
                        for m in estimate["methods"]},
                     **{f"reference_{PER_WINDOW[m]}_prevalence": estimated_pi["reference"][m]
                        for m in estimate["methods"]},
+                    **({"selection_index": selection_index["real"],
+                        "reference_selection_index": selection_index["reference"]}
+                       if "conformal_selection" in methods else {}),
                     counts=np.column_stack([cal.n_benign, cal.n_family]))
     run.save_json({"encoder": enc.to_dict(), "params": sc["params"], "rounds": sc["rounds"],
                    "early_stopping": sc["early_stopping"], "best_iteration": booster.best_iteration,
@@ -576,9 +622,9 @@ def run(cfg: dict, run: runs.Run) -> None:
         "family_floor": c["family_floor"], "family_minimum": minimum, "families": families,
         "calibration_prevalence": pi_cal, "calibration_sessions": n_cal,
         "calibration_expected_attacks": dict(zip(FAMILIES, expected.tolist())),
-        "fixed_index": fixed, "beta": beta, "prevalences": prevalences, "main_prevalence": main,
-        "deployment_periods": periods, "main_period": dep["main_period"], "arms": ARMS, "mixes": mixes,
-        "skipped": skipped, "methods": methods, "draws": draws, "windows": len(windows),
+        "fixed_index": fixed, "beta": beta, "fnr_level": c.get("fnr_level"), "prevalences": prevalences,
+        "main_prevalence": main, "deployment_periods": periods, "main_period": dep["main_period"], "arms": ARMS,
+        "mixes": mixes, "skipped": skipped, "methods": methods, "draws": draws, "windows": len(windows),
         "offline_refused": {m: float(np.mean(out["index"] < 0)) for m, out in offline.items()},
         "selection_auc": sel_auc, "calibration_auc": cal_auc, "forge_calibration": forge_cal,
         "min_type_sessions": MIN_TYPE_SESSIONS, "largest_violation_up_to_pi_max": largest,

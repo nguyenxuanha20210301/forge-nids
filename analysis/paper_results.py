@@ -1,5 +1,6 @@
 """the tables and figures of the paper over seeds, from the pooled tables of e11, e12, e13, e13 at the paper's
-epsilon, e21, e22, e23, e24, e31 and e32 and the run folders of their seeds.
+epsilon, e21, e22, e23, e24, e31 and e32 and the run folders of their seeds, the contracts of E7 recertified from the
+calibration counts of the e11, e12 and e13 runs.
 
     python analysis/paper_results.py
     python analysis/paper_results.py --out results --e21 20261014-232506_44dd25a --audit-rate 0.005
@@ -18,7 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 from forge import paths, runs
-from forge.eval import inference, paper, seeds, starts
+from forge.eval import contract, inference, paper, seeds, starts
 from forge.viz import paper as figures
 from forge.viz.export import save_figure
 
@@ -64,6 +65,12 @@ def tables_of(pooled: dict, args) -> dict:
     if certification:
         out["e7_certification"] = pd.concat(certification, ignore_index=True)
         out["e7_frontier"] = paper.e7_frontier(out["e7_certification"])
+    # every pair of epsilon and pi_max certified again on the calibration sets of every seed, redrawn with this
+    # machine's numpy
+    contracts = {paper.DATASETS[n]: paper.run_folders(pooled[n], paper.EXPERIMENTS[n]) for n in ("e11", "e12", "e13")
+                 if n in pooled}
+    if any(contracts.values()):
+        out["e7_contract"] = contract.contract_table(contracts, audit_rate=args.audit_rate)
     monitoring = []
     # the e21 runs of the pooled folder stand for the monitoring stage on AnoShift, else one run
     if args.e21 is None and "e21" in pooled and paper.run_folders(pooled["e21"], paper.EXPERIMENTS["e21"]):
@@ -155,6 +162,8 @@ def draw(tables: dict, folder: Path) -> list[str]:
     if "e7_certification" in read or "e7_monitoring" in read:
         drawn.append(("e7_workload_vs_risk", figures.e7_workload_vs_risk(
             read.get("e7_certification", pd.DataFrame()), read.get("e7_monitoring", pd.DataFrame()))))
+    if "e7_contract" in read:
+        drawn.append(("e7_dismissed_by_contract", figures.e7_dismissed_by_contract(read["e7_contract"])))
     names = []
     for name, fig in drawn:
         save_figure(fig, folder.parent / "figures", name)

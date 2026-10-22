@@ -26,7 +26,7 @@ E1_EXPERIMENTS = ("e11", "e12", "e13", "e13_floor")
 # the columns of the pooled tables that reach the paper, in their median, low, high and pooled forms
 E1_COLUMNS = ["violation_rate", "violation_window_max", "refused", "dismissed_mean", "for_median",
               "best_up_to_pi_max_dismissed", "best_at_prevalence_dismissed", "best_every_mix_dismissed",
-              "realized_rate"]
+              "realized_rate", "realized_for_mean", "miss_mean"]
 E2_COLUMNS = ["rate", "refused", "dismissed_mean", "for_median", "best_up_to_pi_max_dismissed",
               "best_every_mix_dismissed", "realized_rate"]
 E5_COLUMNS = ["dismissed_mean", "refused", "best_every_mix_dismissed", "violation_rate", "violation_window_max",

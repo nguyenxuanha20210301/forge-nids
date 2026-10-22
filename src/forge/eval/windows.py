@@ -97,6 +97,9 @@ def evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below,
         caught = np.take_along_axis(attack_below, safe[:, None], 1)[:, 0]
         dismissed = np.take_along_axis(window_below, safe[:, None], 1)[:, 0]
         realized = hit & (caught > eps * dismissed)
+        # the share of attacks among the dismissed sessions of the drawn window, 0 where none is dismissed, whose
+        # mean over the draws is the rate conformal selection holds on average
+        proportion = np.divide(caught, dismissed, out=np.zeros(len(hit)), where=hit & (dismissed > 0))
         values[(cell["arm"], method, pi, cell["mix"], cell["window"])] = rate[hit]
         draws = len(hit)
         rows.append({
@@ -107,6 +110,7 @@ def evaluate(methods, offline, online, pi, m_w, b_w, attack_below, window_below,
             "violations": int(over.sum()), **share_with_interval(int(over.sum()), draws),
             "floor_violations": int(under.sum()),
             "realized_violations": int(realized.sum()), "realized_rate": float(realized.mean()),
+            "realized_for_mean": float(proportion.mean()),
         })
     return rows
 
@@ -120,10 +124,12 @@ def pooled(g, certified: np.ndarray, draws: int) -> dict:
         "violation_rate": g["violations"].sum() / pairs, "violation_window_min": g["rate"].min(),
         "violation_window_max": g["rate"].max(), "refused": g["refused"].mean(),
         "dismissed_mean": g["dismissed_mean"].mean(),
+        "miss_mean": g["miss_mean"].mean() if "miss_mean" in g else np.nan,
         "best_at_prevalence_dismissed": g["best_at_prevalence_dismissed"].mean(),
         "best_up_to_pi_max_dismissed": g["best_up_to_pi_max_dismissed"].mean(),
         "for_median": float(np.median(certified)) if len(certified) else np.nan,
         "for_low": float(np.quantile(certified, LOW)) if len(certified) else np.nan,
         "for_high": float(np.quantile(certified, HIGH)) if len(certified) else np.nan,
         "realized_rate": g["realized_violations"].sum() / pairs,
+        "realized_for_mean": g["realized_for_mean"].mean() if "realized_for_mean" in g else np.nan,
     }

@@ -29,6 +29,10 @@ YARDSTICK_LINES = {name: (dash, label) for name, dash, label in [*BEST_LINES, EV
 E6_ARMS = ["monitor", "monitor_any", "window_audit", "none"]
 # the monitoring arm of E7 per dataset, the operating rule of the paper
 E7_MONITOR_ARMS = OPERATING_ARMS
+# the baselines of the tables only, conformal selection and the two at a published miss rate, since eleven methods
+# in the panels over prevalences would hide each other
+TABLE_ONLY = ("conformal_selection", "sahin_mert", "np_umbrella")
+FIGURE_METHODS = [m for m in METHODS if m not in TABLE_ONLY]
 
 
 def _method_line(method: str) -> dict:
@@ -55,7 +59,7 @@ def e1_for_by_prevalence(rows: list[dict]) -> plt.Figure:
     left the FOR of the certified pairs, middle the share of pairs with FOR above epsilon, right the share of the
     window dismissed, with the yardsticks."""
     style.use()
-    methods = [m for m in METHODS if any(m in set(r["data"]["method"]) for r in rows)]
+    methods = [m for m in FIGURE_METHODS if any(m in set(r["data"]["method"]) for r in rows)]
     drawn = [{"data": r["data"], "summary": r["summary"], "label": r["label"], "window": "reference window",
               "unit": DATASET_UNITS.get(r.get("dataset", ""), "sessions")} for r in rows]
     # the floor of the FOR axis follows the medians, since the low quantile over seeds of a FOR that is zero in some
@@ -168,6 +172,51 @@ def e6_leakage_by_family(table: pd.DataFrame, windows: pd.DataFrame, policy: str
     return fig
 
 
+def e7_dismissed_by_contract(table: pd.DataFrame) -> plt.Figure:
+    """the share of the flows FORGE dismisses at the calibration prevalence and mix against pi_max, one line per
+    epsilon and one panel per dataset, the median over seeds with the 5% to 95% range over seeds, a refused draw
+    dismissing nothing, the operating contract of each dataset ringed, and on the right axis the workload the same
+    share leaves, the escalated flows and the audits of the dismissed ones per 1,000 flows."""
+    style.use()
+    datasets = [d for d in DATASET_LABELS if d in set(table["dataset"])]
+    epsilons = sorted(table["epsilon"].unique())
+    # one blue from light to dark as epsilon loosens, with a marker each for gray print
+    shades = np.linspace(0, len(style.SEQUENTIAL) - 1, len(epsilons)).round().astype(int)
+    markers = ["o", "s", "^", "D", "v", "P", "X"]
+    fig, axes = plt.subplots(1, len(datasets), figsize=(style.WIDTH_DOUBLE, 2.8), sharey=True, squeeze=False)
+    axes = axes[0]
+    for ax, dataset, letter in zip(axes, datasets, "abc"):
+        g = table[table["dataset"] == dataset]
+        for k, eps in enumerate(epsilons):
+            h = g[np.isclose(g["epsilon"], eps)].sort_values("pi_max")
+            x = layout.dodge(h["pi_max"], k, len(epsilons), 0.02, log=True)
+            mid, low, high = _range(h, "dismissed_mean")
+            layout.points(ax, x, mid, low, high, color=style.SEQUENTIAL[shades[k]], marker=markers[k % len(markers)],
+                          label=f"$\\varepsilon$ = {eps:g}")
+            ring = h["operating"].astype(bool).to_numpy()
+            ax.plot(x[ring], mid.to_numpy()[ring], linestyle="none", marker="o", markersize=9,
+                    markerfacecolor="none", markeredgecolor=style.INK, markeredgewidth=0.8)
+        pi_max = sorted(g["pi_max"].unique())
+        ax.set_xscale("log")
+        ax.set_xticks(pi_max, [style.percent(v) for v in pi_max])
+        ax.minorticks_off()
+        ax.set_ylim(0, 1)
+        ax.yaxis.set_major_formatter(style.percent)
+        ax.set_xlabel(f"$\\pi_{{\\max}}$, {DATASET_SHORT[dataset]}")
+        layout.panel_letter(ax, letter)
+    pi_cal = float(table["calibration_prevalence"].iloc[0])
+    axes[0].set_ylabel(f"flows dismissed at $\\pi$ = {style.percent(pi_cal)}")
+    # the workload is 1,000 (1 - (1 - q) D) per 1,000 flows for a dismissed share D and an audit rate q
+    q = float(table["audit_rate"].iloc[0])
+    right = axes[-1].secondary_yaxis("right", functions=(lambda d: 1000 * (1 - (1 - q) * np.asarray(d)),
+                                                         lambda w: (1 - np.asarray(w) / 1000) / (1 - q)))
+    right.set_ylabel("workload per 1,000 flows")
+    ring = Line2D([], [], linestyle="none", marker="o", markersize=9, markerfacecolor="none",
+                  markeredgecolor=style.INK, markeredgewidth=0.8)
+    layout.legend_below(fig, axes[0], [], [(ring, "operating contract")], ncol=6)
+    return fig
+
+
 def e7_workload_vs_risk(certification: pd.DataFrame, monitoring: pd.DataFrame) -> plt.Figure:
     """top, the certification stage at the main prevalence with the window's own mix, the workload of every method
     against the share of pairs with FOR above epsilon, the yardsticks as lines. bottom, the monitoring stage at the
@@ -193,7 +242,7 @@ def e7_workload_vs_risk(certification: pd.DataFrame, monitoring: pd.DataFrame) -
                 dash, label = YARDSTICK_LINES[r.policy]
                 sticks[label] = ax.axhline(y, color=style.INK, linestyle=dash, linewidth=1)
                 continue
-            if r.policy not in MARKERS:
+            if r.policy not in FIGURE_METHODS:
                 continue
             drawn.add(r.policy)
             x = h["violation_rate_pooled"].iloc[0] if "violation_rate_pooled" in h else _range(h, "violation_rate")[0].iloc[0]

@@ -53,7 +53,8 @@ from forge.data.synthetic import draw_counts
 from forge.eval import windows as judge
 from forge.eval.metrics import auc
 from forge.experiments.for_vs_prevalence import (ESTIMATED, PER_WINDOW, estimate_settings, estimate_summary,
-                                                 estimated_methods, log_estimates)
+                                                 estimated_methods, log_estimates, published_baselines,
+                                                 selection_methods)
 from forge.experiments.litnet_prevalence import LABELS as E12_LABELS
 from forge.experiments.litnet_prevalence import (ARM_LABELS, ARMS, DERIVED, EVERY_LINE, MARKERS, METHODS,
                                                  WINDOW_WORDS, calibration_shares, fit_scorer, in_claim,
@@ -368,7 +369,10 @@ def run(cfg: dict, run: runs.Run) -> None:
                     "floor": no_floor},
         "conformal_fnr": {"index": conformal_fnr(pooled_below, pooled_n, beta), "floor": no_floor},
         "fixed_sel": {"index": np.full(draws, fixed), "floor": no_floor},
+        **published_baselines(c, delta, methods, pooled_below, pooled_n, no_floor),
     }
+    # conformal selection counts every flow of a calibration set in its p values
+    n_flows = cal.n_benign + cal.n_family.sum(1)
     for method, out in offline.items():
         hit = out["index"] >= 0
         run.log(f"{method}, refused in {np.mean(~hit):.3f} of calibration sets, mean benign share dismissed in the "
@@ -403,6 +407,8 @@ def run(cfg: dict, run: runs.Run) -> None:
     natural_floor = np.zeros((len(windows), draws), dtype=np.float32)
     natural_estimated = {m: np.full((len(windows), draws), -1, dtype=np.int16) for m in estimate["methods"]}
     natural_pi = {m: np.zeros((len(windows), draws), dtype=np.float32) for m in estimate["methods"]}
+    selection_index = {arm: np.full(shape, -1, dtype=np.int16) for arm in ARMS}
+    natural_selection = np.full((len(windows), draws), -1, dtype=np.int16)
     offset = {arm: 1 + a * cells for a, arm in enumerate(ARMS)}
     # the flows of the families left out in each window, which the window's prevalence leaves out
     left_in_window = {f: np.bincount(window[(window >= 0) & (cat_codes == names.index(f))], minlength=len(windows))
@@ -458,12 +464,16 @@ def run(cfg: dict, run: runs.Run) -> None:
                         estimate_rows.append({"arm": arm, **cell_base, "prevalence": pi, "mix": mix,
                                               "natural": False, "window_sessions": n_w, "draws": draws,
                                               **estimate_summary(estimated, pi)})
+                    selected = selection_methods(methods, window_below, np.full(draws, n_w), pooled_below, n_flows,
+                                                 eps)
+                    if selected:
+                        selection_index[arm][i, j, k] = selected["conformal_selection"]["index"]
                     m = shares @ m_family
                     j_every = every.get(arm, -1)
                     every_share = (np.nan if arm not in every else
                                    float(pi * m[j_every] + (1 - pi) * b[j_every]) if j_every >= 0 else 0.0)
-                    rows += judge.evaluate(methods, offline, {"forge_online": online, **per_window}, pi, m, b,
-                                           attack_below, window_below, eps, values,
+                    rows += judge.evaluate(methods, offline, {"forge_online": online, **per_window, **selected}, pi,
+                                           m, b, attack_below, window_below, eps, values,
                                            {"arm": arm, **cell_base, "prevalence": pi, "mix": mix,
                                             "window_sessions": n_w, "benign_subsampled": subsampled,
                                             "in_claim": claim,
@@ -489,9 +499,12 @@ def run(cfg: dict, run: runs.Run) -> None:
                 estimate_rows.append({"arm": "real", **cell_base, "prevalence": natural, "mix": "window",
                                       "natural": True, "window_sessions": n_w, "draws": draws,
                                       **estimate_summary(estimated, natural)})
+            selected = selection_methods(methods, window_below, np.full(draws, n_w), pooled_below, n_flows, eps)
+            if selected:
+                natural_selection[i] = selected["conformal_selection"]["index"]
             m = own @ m_w_family
-            natural_rows += judge.evaluate(methods, offline, {"forge_online": online, **per_window}, natural, m, b_w,
-                                           attack_below, window_below, eps, natural_values,
+            natural_rows += judge.evaluate(methods, offline, {"forge_online": online, **per_window, **selected},
+                                           natural, m, b_w, attack_below, window_below, eps, natural_values,
                                            {"arm": "real", **cell_base, "prevalence": natural, "mix": "window",
                                             "window_sessions": n_w, "in_claim": own_claim,
                                             "up_to_pi_max": natural <= pi_max,
@@ -613,7 +626,9 @@ def run(cfg: dict, run: runs.Run) -> None:
     # the per window methods read at the real windows at their own prevalence
     natural_rows_of = [i for i in range(len(windows)) if i not in without_attacks]
     natural_per_method = {"forge_online": natural_index[natural_rows_of],
-                          **{m: natural_estimated[m][natural_rows_of] for m in estimate["methods"]}}
+                          **{m: natural_estimated[m][natural_rows_of] for m in estimate["methods"]},
+                          **({"conformal_selection": natural_selection[natural_rows_of]}
+                             if "conformal_selection" in methods else {})}
     unseen_summary = {}
     for f, u in unseen.items():
         below = counts_below(u["score"], grid)
@@ -660,6 +675,8 @@ def run(cfg: dict, run: runs.Run) -> None:
                        for m in estimate["methods"]},
                     **{f"natural_{PER_WINDOW[m]}_index": natural_estimated[m] for m in estimate["methods"]},
                     **{f"natural_{PER_WINDOW[m]}_prevalence": natural_pi[m] for m in estimate["methods"]},
+                    **({"selection_index": np.stack([selection_index[arm] for arm in ARMS]),
+                        "natural_selection_index": natural_selection} if "conformal_selection" in methods else {}),
                     counts=np.column_stack([cal.n_benign, cal.n_family]))
     run.save_json({"encoder": enc.to_dict(), "features": features, "params": sc["params"], "rounds": sc["rounds"],
                    "early_stopping": sc["early_stopping"], "best_iteration": booster.best_iteration,
@@ -679,7 +696,8 @@ def run(cfg: dict, run: runs.Run) -> None:
         "calibration_prevalence": pi_cal, "calibration_mix": cc["mix"], "calibration_sessions": n_cal,
         "calibration_attacks": dict(zip(families, n_attack_cal.tolist())),
         "calibration_expected_attacks": dict(zip(families, expected.tolist())),
-        "fixed_start": fixed_start, "fixed_index": fixed, "beta": beta, "prevalences": prevalences,
+        "fixed_start": fixed_start, "fixed_index": fixed, "beta": beta, "fnr_level": c.get("fnr_level"),
+        "prevalences": prevalences,
         "main_prevalence": main, "arms": ARMS,
         "mixes": mixes, "subsample_benign": dep["subsample_benign"], "skipped": skipped, "methods": methods,
         "draws": draws, "windows": len(windows), "empty_windows": empty, "windows_without_attacks": without_attacks,

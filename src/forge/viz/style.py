@@ -21,8 +21,11 @@ SEQUENTIAL = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", 
 METHOD_ORDER = ("forge_simplex", "forge_pooled", "ltt_iid", "forge_strict", "forge_online", "forge_previous",
                 "conformal_fnr", "fixed_sel")
 # the eight slots are taken, so a method that varies another takes its color and is told apart by its marker. LTT
-# at an estimated prevalence, plug in and upper bound, keeps the color of LTT
-COLOR_ALIASES = {"ltt_plugin": "ltt_iid", "ltt_upper": "ltt_iid"}
+# at an estimated prevalence, plug in and upper bound, and conformal selection, which holds the FOR at the calibration
+# prevalence on average, keep the color of LTT, and the two baselines on the miss rate at a published level that of
+# conformal FNR
+COLOR_ALIASES = {"ltt_plugin": "ltt_iid", "ltt_upper": "ltt_iid", "conformal_selection": "ltt_iid",
+                 "sahin_mert": "conformal_fnr", "np_umbrella": "conformal_fnr"}
 
 # single column and double column widths in inches, close to most Elsevier and IEEE templates
 WIDTH_SINGLE = 3.5

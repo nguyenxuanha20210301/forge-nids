@@ -49,6 +49,11 @@ certify:
   # of calibration flows dismissed in place of the benign one, false starts it at the first threshold that could pass
   # with no attack
   ltt_guarded_start: true
+  # the miss rate of the two baselines at a published level, Şahin and Mert at the beta of their paper on average
+  # over the calibration draw and the Neyman-Pearson umbrella of Tong, Feng and Li at the same level with
+  # probability 1 - delta. conformal selection of Jin and Candès holds the share of attacks among the dismissed
+  # flows of a window at epsilon on average and needs no level of its own
+  fnr_level: 0.01
   # thresholds at the benign quantiles j / (grid_size + 1) of the selection parts, and at the levels of grid_tail,
   # where the misses of a scorer that restates the labelling rules may all lie
   grid_size: 1000
@@ -91,5 +96,6 @@ deployment:
   min_family_attacks: 1000
 
 simulation:
-  methods: [forge_simplex, forge_pooled, forge_online, ltt_iid, ltt_plugin, ltt_upper, conformal_fnr, fixed_sel]
+  methods: [forge_simplex, forge_pooled, forge_online, ltt_iid, ltt_plugin, ltt_upper, conformal_selection,
+            conformal_fnr, sahin_mert, np_umbrella, fixed_sel]
   draws: 1000

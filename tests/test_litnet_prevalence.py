@@ -3,7 +3,8 @@ import numpy as np
 import pytest
 
 from forge import experiments, runs
-from forge.certify.certificate import (certify, certify_online, conformal_fnr, fixed_sequence, for_from_rates,
+from forge.certify.certificate import (certify, certify_online, conformal_fnr, conformal_selection, fixed_sequence,
+                                       for_from_rates, np_umbrella,
                                        group_rows, ltt_iid)
 from forge.config import load_config
 from forge.data import litnet2020, splits
@@ -225,6 +226,11 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
     assert np.array_equal(saved["ltt_iid_index"], ltt["index"])
     assert np.array_equal(saved["conformal_fnr_index"], conformal_fnr(pooled_below, pooled_n, summary["beta"]))
     assert (saved["fixed_sel_index"] == fixed).all()
+    # the two baselines at the published miss rate, the PAC one never looser than the one that holds it on average
+    assert summary["fnr_level"] == c["fnr_level"]
+    assert np.array_equal(saved["sahin_mert_index"], conformal_fnr(pooled_below, pooled_n, c["fnr_level"]))
+    assert np.array_equal(saved["np_umbrella_index"], np_umbrella(pooled_below, pooled_n, c["fnr_level"], c["delta"]))
+    assert (saved["np_umbrella_index"] <= saved["sahin_mert_index"]).all()
     # the merged group makes the simplex claim refuse in some draws, while the pooled one, which covers the calibration
     # mix only, certifies looser thresholds
     assert 0 < np.mean(simplex["index"] < 0) < 0.6
@@ -308,9 +314,11 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
         stream = 1 + ARMS.index(arm) * cells + (i * len(prevalences) + j) * len(mixes) + k
         window = draw_counts(np.random.default_rng(seeds[stream]), row["window_sessions"], prevalences[j],
                              own if mixes[k] == "window" else shares_cal, b, m_family, DRAWS)
-        online[(arm, i)] = certify_online(window.benign_below + window.family_below.sum(1), row["window_sessions"],
-                                          *grouped, *args, **start)
+        below = window.benign_below + window.family_below.sum(1)
+        online[(arm, i)] = certify_online(below, row["window_sessions"], *grouped, *args, **start)
         assert np.array_equal(online[(arm, i)]["index"], saved["online_index"][ARMS.index(arm), i, j, k])
+        selected = conformal_selection(below, row["window_sessions"], pooled_below, cal.n_benign + pooled_n, EPS)
+        assert np.array_equal(selected, saved["selection_index"][ARMS.index(arm), i, j, k])
     assert claims.loc[(claims["arm"] == "real") & (claims["window"] == 1) & (claims["prevalence"] == 0.4),
                       "benign_subsampled"].all()
     # a window without an arm keeps the empty value
@@ -334,6 +342,13 @@ def test_e12_tables_figures_and_window_rates(litnet_signal, tmp_path):
                                    **start)
             assert np.array_equal(again["index"], saved["natural_online_index"][i])
             index = saved["natural_online_index"][i]
+        elif row.method == "conformal_selection":
+            window = draw_counts(np.random.default_rng(seeds[1 + len(ARMS) * cells + i]), int(sizes.sum()), pi, own,
+                                 b_w, m_w, DRAWS)
+            again = conformal_selection(window.benign_below + window.family_below.sum(1), int(sizes.sum()),
+                                        pooled_below, cal.n_benign + pooled_n, EPS)
+            assert np.array_equal(again, saved["natural_selection_index"][i])
+            index = saved["natural_selection_index"][i]
         elif row.method in module.PER_WINDOW:
             index = saved[f"natural_{module.PER_WINDOW[row.method]}_index"][i]
         else:

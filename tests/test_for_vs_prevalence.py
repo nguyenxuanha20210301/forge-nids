@@ -3,8 +3,9 @@ import numpy as np
 import pytest
 
 from forge import experiments, runs
-from forge.certify.certificate import (certify, certify_online, estimate_prevalence, estimated_certifier,
-                                       for_from_rates, group_rows, ks_threshold, plug_in)
+from forge.certify.certificate import (certify, certify_online, conformal_fnr, conformal_selection,
+                                       estimate_prevalence, estimated_certifier, for_from_rates, group_rows,
+                                       ks_threshold, np_umbrella, plug_in)
 from forge.config import load_config
 from forge.data.synthetic import draw_counts
 from forge.eval.metrics import auc
@@ -65,6 +66,12 @@ def recompute_certificates(cfg, run, cells, reference_cells=()):
     grouped = group_rows(cal.family_below, cal.n_family, hist["groups"])
     offline = certify(cal.benign_below, cal.n_benign, *grouped, *args, **start)
     assert np.array_equal(offline["index"], saved["forge_simplex_index"])
+    # the two baselines at the published miss rate, the PAC one never looser than the one that holds it on average
+    pooled_below, pooled_n = cal.family_below.sum(1), cal.n_family.sum(1)
+    assert np.array_equal(saved["sahin_mert_index"], conformal_fnr(pooled_below, pooled_n, c["fnr_level"]))
+    assert np.array_equal(saved["np_umbrella_index"], np_umbrella(pooled_below, pooled_n, c["fnr_level"], c["delta"]))
+    assert (saved["np_umbrella_index"] <= saved["sahin_mert_index"]).all()
+    claims = runs.load_table(run.dir, "claims")
     windows = runs.load_table(run.dir, "windows")
     tested = [(arm, cell) for arm, group in [("real", cells), ("reference", reference_cells)] for cell in group]
     for arm, (i, j, k) in tested:
@@ -78,9 +85,21 @@ def recompute_certificates(cfg, run, cells, reference_cells=()):
         stream = 1 + (cells_per_arm if arm == "reference" else 0) + (i * len(prevalences) + j) * len(mixes) + k
         window = draw_counts(np.random.default_rng(seeds[stream]), n, prevalences[j],
                              mix_shares(mixes[k], own, shares), b, m, draws)
-        online = certify_online(window.benign_below + window.family_below.sum(1), n, *grouped, *args, **start)
+        below = window.benign_below + window.family_below.sum(1)
+        online = certify_online(below, n, *grouped, *args, **start)
         key = "online_index" if arm == "real" else "reference_online_index"
         assert np.array_equal(online["index"], saved[key][i, j, k])
+        # conformal selection on the same window, against every flow of the calibration sets, and the mean share of
+        # attacks among the window's dismissed sessions at its thresholds
+        selected = conformal_selection(below, n, pooled_below, cal.n_benign + pooled_n, c["epsilon"])
+        key = "selection_index" if arm == "real" else "reference_selection_index"
+        assert np.array_equal(selected, saved[key][i, j, k])
+        rows = np.arange(draws)
+        caught, dismissed = window.family_below.sum(1)[rows, selected], below[rows, selected]
+        share = np.divide(caught, dismissed, out=np.zeros(draws), where=(selected >= 0) & (dismissed > 0))
+        row = claims[(claims["arm"] == arm) & (claims["window"] == i) & (claims["prevalence"] == prevalences[j])
+                     & (claims["mix"] == mixes[k]) & (claims["method"] == "conformal_selection")]
+        assert np.isclose(row["realized_for_mean"].iloc[0], share.mean())
     return offline, saved
 
 

@@ -4,9 +4,9 @@ from scipy.stats import beta, binom, binomtest
 
 from forge.certify.bounds import clopper_pearson_lower, clopper_pearson_upper, dkw_margin
 from forge.certify.certificate import (certify, certify_online, certify_online_scores, certify_scores, conformal_fnr,
-                                       counts_below, estimate_prevalence, estimated_certifier, family_groups,
-                                       fixed_sequence, for_from_dismissed, for_from_rates, group_rows, ks_threshold,
-                                       ltt_iid, min_family_size, online_certifier, plug_in)
+                                       conformal_selection, counts_below, estimate_prevalence, estimated_certifier,
+                                       family_groups, fixed_sequence, for_from_dismissed, for_from_rates, group_rows,
+                                       ks_threshold, ltt_iid, min_family_size, np_umbrella, online_certifier, plug_in)
 from forge.data.synthetic import benign_path, beta_cdfs, draw_counts, sample_flows
 
 BENIGN = (2, 8)
@@ -422,6 +422,92 @@ def test_conformal_fnr_keeps_the_miss_rate_below_beta_on_average():
     true = np.where(index >= 0, m[np.maximum(index, 0)], 0.0)
     assert 0.017 < true.mean() <= 0.02 + 3 * true.std() / np.sqrt(len(true))
     assert np.mean(true > 0.02) > 0.2
+
+
+def test_np_umbrella_takes_the_order_statistic_of_tong_feng_and_li():
+    # their rule classifies a calibration attack as benign above the k-th of n ordered scores, with k the least whose
+    # binomial tail of n at 1 - alpha from k on is at most delta, so n - k attacks may lie on the dismissed side
+    n, alpha, delta = 1000, 0.01, 0.05
+    k = next(k for k in range(1, n + 1) if binom.sf(k - 1, n, 1 - alpha) <= delta)
+    below = np.arange(30)
+    assert np_umbrella(below, n, alpha, delta) == n - k == 4
+    assert clopper_pearson_upper(4, n, delta) <= alpha < clopper_pearson_upper(5, n, delta)
+    # one row per calibration set, and a set whose strictest threshold already holds too many attacks refuses
+    two = np.stack([below, below + 5])
+    assert np_umbrella(two, np.array([n, n]), alpha, delta).tolist() == [4, -1]
+    # the same counts out of more attacks allow more of them
+    assert np_umbrella(below, 10 * n, alpha, delta) > 4
+
+
+def test_np_umbrella_holds_the_miss_rate_with_probability_and_conformal_fnr_on_average():
+    # at the same level the PAC threshold sits below the one that holds the miss rate on average, and its true miss
+    # rate exceeds the level in at most delta of the draws, where the average one exceeds it often
+    grid = beta.ppf(np.linspace(0.001, 0.999, 2000), *FAMILIES[0])
+    m = beta.cdf(grid, *FAMILIES[0])
+    b, _ = beta_cdfs(grid, BENIGN, FAMILIES)
+    d = draw_counts(np.random.default_rng(13), 2000, 0.5, [1.0], b, m[None], 4000)
+    umbrella = np_umbrella(d.family_below[:, 0], d.n_family[:, 0], 0.02, 0.05)
+    average = conformal_fnr(d.family_below[:, 0], d.n_family[:, 0], 0.02)
+    assert (umbrella >= 0).all() and (umbrella <= average).all()
+    true = m[umbrella]
+    assert np.mean(true > 0.02) <= 0.05 + 3 * np.sqrt(0.05 * 0.95 / len(true))
+    assert np.mean(m[average] > 0.02) > 0.2
+
+
+def test_conformal_selection_is_the_benjamini_hochberg_step_on_the_window_flows():
+    # p values 0.0001, 0.0002, 0.0006, 0.0041 and 0.0201 against level times the window share 0.0001, 0.0005, 0.003,
+    # 0.006 and 0.01, so the step passes up to the fourth threshold
+    window, attack = np.array([10, 50, 300, 600, 1000]), np.array([0, 1, 5, 40, 200])
+    assert conformal_selection(window, 1000, attack, 10000, 0.01) == 3
+    # the step takes the loosest passing threshold even after a failure, and none when nothing passes
+    assert conformal_selection(np.array([10, 20, 900]), 1000, np.array([0, 50, 60]), 10000, 0.01) == 2
+    assert conformal_selection(window, 1000, attack + 100, 10000, 0.01) == -1
+    # the same step on the p values of single flows, scores rounded up to their grid threshold
+    rng = np.random.default_rng(5)
+    grid = np.linspace(0.05, 0.95, 19)
+    for _ in range(50):
+        cal = rng.beta(3, 2, size=40)
+        n_cal = 400
+        flows = np.r_[rng.beta(1, 6, size=300), rng.beta(3, 2, size=rng.integers(1, 40))]
+        level = rng.choice([0.05, 0.1, 0.2])
+        rank = np.searchsorted(grid, flows, side="left")
+        p = np.where(rank < len(grid), (1 + counts_below(cal, grid)[np.minimum(rank, len(grid) - 1)]) / (n_cal + 1),
+                     np.inf)
+        ordered = np.sort(p)
+        passing = np.flatnonzero(ordered <= level * np.arange(1, len(flows) + 1) / len(flows))
+        selected = p <= level * (passing[-1] + 1) / len(flows) if len(passing) else np.zeros(len(flows), bool)
+        index = conformal_selection(counts_below(flows, grid), len(flows), counts_below(cal, grid), n_cal, level)
+        assert np.array_equal(selected, flows <= grid[index] if index >= 0 else np.zeros(len(flows), bool))
+
+
+def test_conformal_selection_holds_the_rate_at_the_calibration_prevalence_and_not_above():
+    # calibration sets and windows drawn from the same mixture are exchangeable, and the mean share of attacks among
+    # the dismissed flows of the window stays at the level, while the true FOR at the threshold exceeds the level in
+    # a large share of the draws, since the guarantee is an average. a window at four times the prevalence takes
+    # about four times the level, the step stopping inside the grid at either prevalence
+    grid = beta.ppf(np.arange(1, 201) / 201, *BENIGN)
+    b, m = beta_cdfs(grid, BENIGN, FAMILIES)
+    level, draws = 0.002, 3000
+
+    def selected(pi_w):
+        cal = draw_counts(np.random.default_rng(21), 20000, 0.05, SHARES, b, m, draws)
+        win = draw_counts(np.random.default_rng(22), 20000, pi_w, SHARES, b, m, draws)
+        attacks = win.family_below.sum(1)
+        below = win.benign_below + attacks
+        index = conformal_selection(below, np.full(draws, 20000), cal.family_below.sum(1),
+                                    cal.n_benign + cal.n_family.sum(1), level)
+        rows = np.arange(draws)
+        caught, dismissed = attacks[rows, index], below[rows, index]
+        share = np.divide(caught, dismissed, out=np.zeros(draws), where=(index >= 0) & (dismissed > 0))
+        true = for_from_rates(pi_w, np.array(SHARES) @ m, b)[index]
+        return index, share, true
+
+    index, share, true = selected(0.05)
+    assert (index >= 0).all() and np.quantile(index, 0.95) < len(grid) - 1
+    assert share.mean() <= level + 3 * share.std() / np.sqrt(draws)
+    assert np.mean(true > level) > 0.2
+    index, share, _ = selected(0.2)
+    assert np.quantile(index, 0.95) < len(grid) - 1 and share.mean() > 3 * level
 
 
 def test_plug_in_stops_at_the_first_estimate_above_epsilon():

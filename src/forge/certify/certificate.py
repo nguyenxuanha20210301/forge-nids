@@ -44,8 +44,10 @@ the same argument holds with probability at least 1 - delta_m - delta_window. on
 score distributions between D_cal and the window.
 
 the baselines of RQ1 besides Learn then Test claim less. the conformal threshold of Şahin and Mert bounds the miss rate
-on average over the calibration draw, and the threshold of common practice reads the rate off a labeled set without
-any bound.
+on average over the calibration draw, the Neyman-Pearson umbrella of Tong, Feng and Li bounds it with probability
+1 - delta, conformal selection of Jin and Candès bounds the share of attacks among the dismissed flows of a window on
+average when the window is exchangeable with the calibration set, so at the calibration prevalence and mix, and the
+threshold of common practice reads the rate off a labeled set without any bound.
 
 Learn then Test at a prevalence estimated on the window is the pooled certificate above with the estimate in place of
 pi_max. at a threshold t fixed on D_sel the share of a window's flows at or below it is pi m(t) + (1 - pi) b(t), so
@@ -253,6 +255,47 @@ def conformal_fnr(attack_below, n_attack, beta):
     """
     allowed = np.floor(beta * (np.asarray(n_attack) + 1)) - 1
     return fixed_sequence(np.asarray(attack_below) <= np.asarray(allowed)[..., None], 0)
+
+
+def np_umbrella(attack_below, n_attack, alpha, delta):
+    """the Neyman-Pearson umbrella of Tong, Feng and Li, the baseline of RQ1 with a PAC guarantee on the miss rate.
+
+    the umbrella takes as its threshold the order statistic of the n calibration attacks with the most attacks k at or
+    below it such that a binomial of n at alpha falls at or below k with probability at most delta. on the grid that is
+    the loosest threshold whose one sided Clopper-Pearson bound on the miss rate at delta stays at or below alpha,
+    since the bound of k attacks out of n lies at or below alpha exactly when that binomial condition holds. the bound
+    grows with the count, so the passing thresholds are the first ones of the grid. an attack
+    exchangeable with the calibration attacks then falls at or below the threshold with probability at most alpha,
+    with probability at least 1 - delta over the calibration draw, which says nothing about the FOR. attack_below
+    holds all attacks in one row, shape (..., G). returns the index of the threshold, -1 when the strictest one fails.
+    """
+    upper = np.asarray(clopper_pearson_upper(attack_below, np.asarray(n_attack)[..., None], delta))
+    return fixed_sequence(upper <= alpha, 0)
+
+
+def conformal_selection(window_below, n_window, attack_below, n_cal, level):
+    """conformal selection of Jin and Candès on one deployment window, the baseline of RQ1 that bounds the share of
+    attacks among the dismissed flows on average, their false discovery rate with an attack as the null.
+
+    a flow of the window is dismissed when its conformal p value passes the Benjamini-Hochberg step at level over the
+    window's flows. with the score of every flow rounded up to its grid threshold, an increasing transform, the p
+    value of a flow at threshold j is (1 + attack_below_j) / (n_cal + 1), with n_cal the calibration flows of both
+    classes, so it grows with j, and the step dismisses every flow at or below the loosest threshold whose p value is
+    at most level times the share of the window's flows at or below it. Jin and Candès prove that the step holds the
+    rate at level when the calibration flows and the window's flows are exchangeable, with the ties broken at random,
+    and a p value that counts every tie is never smaller. the p value of a threshold is about the calibration
+    prevalence times its miss rate, so on a window above that prevalence the share of attacks among the dismissed
+    flows grows to about level times the ratio of the two prevalences, where the step stops inside the grid.
+
+    window_below has shape (..., G) and counts the window's flows at or below each threshold whatever their label, out
+    of n_window flows, shape (...). attack_below holds the calibration attacks in one row and broadcasts against it,
+    with n_cal of shape (...). returns the index of the threshold, -1 when no threshold passes.
+    """
+    p = (1 + np.asarray(attack_below, dtype=float)) / (np.asarray(n_cal, dtype=float)[..., None] + 1)
+    share = np.asarray(window_below, dtype=float) / np.asarray(n_window, dtype=float)[..., None]
+    passes = p <= level * share
+    last = passes.shape[-1] - 1 - first_index(passes[..., ::-1])
+    return np.where(passes.any(-1), last, -1)
 
 
 def plug_in(benign_below, n_benign, attack_below, n_attack, eps, pi):

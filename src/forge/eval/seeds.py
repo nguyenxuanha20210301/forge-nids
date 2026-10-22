@@ -270,7 +270,8 @@ def e1_table(pooled: pd.DataFrame, summary: dict, experiment: str) -> pd.DataFra
     t = t.assign(main=t["prevalence"] == summary["main_prevalence"])
     columns = ["method", "mix", "prevalence", "main", "windows", "seeds"] + _stats(t, [
         "violation_rate", "violation_window_max", "refused", "dismissed_mean", "for_median",
-        "best_up_to_pi_max_dismissed", "best_at_prevalence_dismissed", "best_every_mix_dismissed", "realized_rate"])
+        "best_up_to_pi_max_dismissed", "best_at_prevalence_dismissed", "best_every_mix_dismissed", "realized_rate",
+        "realized_for_mean", "miss_mean"])
     return t.sort_values(["mix", "method", "prevalence"])[[c for c in columns if c in t]].reset_index(drop=True)
 
 
