@@ -114,6 +114,10 @@ E3_COLUMNS = ["alarm_rate", "false_alarm_rate", "alarm_block_median", "alarm_ses
 E4_COLUMNS = ["audits_per_million", "alarm_rate", "false_alarm_rate", "alarm_block_median", "alarm_session_median",
               "leak_median", "leak_mean", "leak_in_delay_median", "excess_median", "dismissed_share_mean",
               "bound_median", "over_bound_rate", "miscover_sequence_rate", "sequences", "blocks_certified_mean"]
+# the shares of the stream tables taken over a part of the draws, each with the share of draws that is its part, the
+# share of alarms above the bound of Theorem 3 over the draws with an alarm and the alarms inside the window of the
+# unseen family over the draws in which that window is violated
+SHARE_UNITS = {"over_bound_rate": "alarm_rate", "alarm_in_unseen_violated_rate": "unseen_violated_rate"}
 
 
 def flatten(cfg: dict, prefix: str = "") -> dict:
@@ -181,7 +185,9 @@ def pool(frames: dict, keys: list[str], weight: str | None = None) -> pd.DataFra
     """frames maps a seed to the same table of its run. returns one row per key with the columns every seed agrees on
     kept as they are, the median and the 5% and 95% quantiles over seeds of every other number as <column>_median,
     _low and _high, a share of draws also pooled over the draws of every seed as <column>_pooled when weight names
-    the draws, and seeds, the seeds behind the row. a text column that moves with the seed is left out."""
+    the draws, a share of SHARE_UNITS over its part of the draws, and seeds, the seeds behind the row. a seed without
+    a share adds nothing to its pooled value, which is missing when no seed has the share. a text column that moves
+    with the seed is left out."""
     keys = [k for k in keys if all(k in f for f in frames.values())]
     if not keys:
         raise ValueError("no key column is shared by the tables")
@@ -194,6 +200,11 @@ def pool(frames: dict, keys: list[str], weight: str | None = None) -> pd.DataFra
     for col in both.columns:
         if pd.api.types.is_bool_dtype(both[col]):
             both[col] = both[col].astype(float)
+    # a share over a part of the draws is no share where the part is empty, though a run writes 0 for the share of
+    # alarms above the bound when it has no alarm
+    for col, part in SHARE_UNITS.items():
+        if col in both and part in both:
+            both[col] = both[col].where(both[part] > 0)
     grouped = both.groupby(keys, sort=False, dropna=False)
     out = grouped.size().rename("seeds").reset_index()
     stats = {}
@@ -208,9 +219,13 @@ def pool(frames: dict, keys: list[str], weight: str | None = None) -> pd.DataFra
             stats[f"{col}_high"] = grouped[col].quantile(HIGH).to_numpy()
             if weight in both and _is_rate(col):
                 w = both[weight].astype(float)
-                num = (both[col].astype(float) * w).groupby([both[k] for k in keys], sort=False, dropna=False).sum()
-                den = w.groupby([both[k] for k in keys], sort=False, dropna=False).sum()
-                stats[f"{col}_pooled"] = (num / den).to_numpy()
+                if col in SHARE_UNITS and SHARE_UNITS[col] in both:
+                    w = np.rint(w * both[SHARE_UNITS[col]].astype(float))
+                w = w.where(both[col].notna())
+                by = [both[k] for k in keys]
+                num = (both[col].astype(float) * w).groupby(by, sort=False, dropna=False).sum(min_count=1)
+                den = w.groupby(by, sort=False, dropna=False).sum(min_count=1)
+                stats[f"{col}_pooled"] = (num / den.where(den > 0)).to_numpy()
     return pd.concat([out, pd.DataFrame(stats, index=out.index)], axis=1)
 
 

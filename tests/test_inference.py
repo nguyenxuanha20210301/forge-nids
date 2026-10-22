@@ -256,10 +256,9 @@ def test_e3_paired_arms_and_intervals_count_draws_sequences_and_alarms(tmp_path)
     at = table.columns.get_loc("over_bound_rate_pooled")
     assert table.columns[at + 1:at + 3].tolist() == ["over_bound_rate_ci_low", "over_bound_rate_ci_high"]
     by = table.set_index(["policy", "arm"])
-    pooled_by_draws = e3.set_index(["policy", "arm"])
-    # pooled by draws the share of alarms above the bound was the mean over seeds, and a share no seed has was zero
-    assert pooled_by_draws.loc[("forge_simplex", "monitor_week"), "over_bound_rate_pooled"] == pytest.approx(0.005 / 3)
     assert by.loc[("forge_simplex", "monitor_week"), "over_bound_rate_pooled"] == pytest.approx(0.002)
-    assert pooled_by_draws.loc[("forge_simplex", "none"), "miscover_rate_pooled"] == 0.0
     assert np.isnan(by.loc[("forge_simplex", "none"), "miscover_rate_pooled"])
-    np.testing.assert_allclose(table["alarm_rate_pooled"], e3["alarm_rate_pooled"])
+    # the pool takes the share of alarms above the bound over the alarms and leaves a share no seed has missing, so
+    # its pooled shares are those of the counts behind the intervals
+    for col in [c for c in e3 if c.endswith("_pooled")]:
+        np.testing.assert_allclose(table[col], e3[col])

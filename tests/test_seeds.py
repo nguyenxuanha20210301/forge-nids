@@ -72,6 +72,32 @@ def test_config_differences_and_pooling():
         seeds.pool(frames, ["year"], "draws")
 
 
+def test_pool_takes_a_share_over_its_units_and_leaves_out_a_seed_without_it():
+    # three seeds of a stream table, the monitor alarming in half of the draws of seed 0, in none of seed 1 and in all
+    # of seed 2, the window of the unseen family violated in none of the draws of seed 0, and the arm without a
+    # sequence carrying no share above a bound and no miscoverage
+    def frame(seed):
+        return pd.DataFrame({
+            "arm": ["monitor", "none"], "draws": [1000, 1000], "alarm_rate": [{0: 0.5, 1: 0.0, 2: 1.0}[seed], 0.0],
+            "false_alarm_rate": [np.nan if seed == 1 else 0.1 * seed, 0.0],
+            "over_bound_rate": [{0: 2 / 500, 1: 0.0, 2: 0.001}[seed], np.nan],
+            "miscover_rate": [0.01 * seed, np.nan], "unseen_violated_rate": [0.2 * seed] * 2,
+            "alarm_in_unseen_violated_rate": [{0: np.nan, 1: 0.5, 2: 0.25}[seed]] * 2})
+
+    pooled = seeds.pool({seed: frame(seed) for seed in (0, 1, 2)}, ["arm"], "draws").set_index("arm")
+    monitor, none = pooled.loc["monitor"], pooled.loc["none"]
+    # 2 and 1 alarms above the bound among the 500 and 1,000 alarms of seeds 0 and 2, the seed without alarms adding
+    # nothing to the pooled share and staying out of the quantiles over seeds
+    assert monitor["over_bound_rate_pooled"] == pytest.approx(3 / 1500)
+    assert monitor["over_bound_rate_median"] == pytest.approx(0.0025)
+    # 100 and 100 alarms inside the window among the 200 and 400 draws in which it is violated
+    assert monitor["alarm_in_unseen_violated_rate_pooled"] == pytest.approx(200 / 600)
+    # a share missing in one seed is pooled over the others, and one missing in every seed stays missing
+    assert monitor["false_alarm_rate_pooled"] == pytest.approx(200 / 2000)
+    assert monitor["miscover_rate_pooled"] == pytest.approx(30 / 3000)
+    assert np.isnan(none["miscover_rate_pooled"]) and np.isnan(none["over_bound_rate_pooled"])
+
+
 def test_select_runs_keeps_one_finished_run_per_seed_with_one_config(tmp_path):
     root = tmp_path / "runs"
     base = {"seed": 0, "experiment": {"name": "e99"}, "certify": {"grid_size": 10}}

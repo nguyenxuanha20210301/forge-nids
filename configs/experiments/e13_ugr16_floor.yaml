@@ -10,7 +10,8 @@ experiment:
 certify:
   # the paper's epsilon, at which the run of record 20261018-024353_746438f refused 0.973 of the calibration sets at
   # the feasible start. the Neris botnet is labelled by host and part of its flows is the hosts' ordinary traffic, so
-  # its miss rate grows with the benign share dismissed and its FOR at pi_max has a floor within a fifth of this
-  # epsilon, which no bound on its 10,740 calibration flows fits under. the certificate refuses most or all
-  # calibration sets of every seed from any start, so no e24 runs on these runs
+  # its miss rate grows with the benign share dismissed, and at seed 0 its FOR at pi_max has a floor within a fifth
+  # of this epsilon, which a bound on its 10,740 calibration flows seldom fits under. at the share start the
+  # certificate refuses 0.823 of the calibration sets over the 20 scorer seeds and every set in 5 of them, so no
+  # e24 runs on these runs
   epsilon: 0.001

@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 
 from forge import paths, runs
-from forge.eval import paper, seeds
+from forge.eval import inference, paper, seeds, starts
 from forge.viz import paper as figures
 from forge.viz.export import save_figure
 
@@ -55,6 +55,7 @@ def tables_of(pooled: dict, args) -> dict:
         out["e1_for_by_prevalence"] = paper.e1_table(pooled)
     out.update(paper.e2_tables(pooled))
     out.update(paper.e3_tables(pooled))
+    out.update(statistics(pooled, out))
     out.update(paper.e5_tables(pooled))
     out.update(paper.e6_tables(pooled))
     certification = [paper.e7_certification(paper.run_folders(pooled[n], paper.EXPERIMENTS[n]), args.audit_rate)
@@ -81,6 +82,44 @@ def tables_of(pooled: dict, args) -> dict:
     if monitoring:
         out["e7_monitoring"] = pd.concat(monitoring, ignore_index=True)
     return out
+
+
+def statistics(pooled: dict, out: dict) -> dict:
+    """the tables over seeds read from the run folders behind the pooled tables, the start rules of e13, the price,
+    the baselines against FORGE and the violation of FORGE per seed in E1, the operating rule against the other arms in
+    E3, and the E1 and E3 tables with the intervals of their pooled shares. an experiment with a run folder missing
+    is left out of them with a line, since its counts would not be those of its pooled table."""
+    folders = {}
+    for name in (*paper.E1_EXPERIMENTS, "e21", "e24"):
+        if name not in pooled:
+            continue
+        found = paper.run_folders(pooled[name], paper.EXPERIMENTS[name])
+        if len(found) == len(pooled[name]["runs"]):
+            folders[name] = found
+        else:
+            print(f"{paper.EXPERIMENTS[name]} has {len(found)} of {len(pooled[name]['runs'])} run folders, left out "
+                  "of the tables over seeds")
+    tables = {}
+    e1 = [name for name in paper.E1_EXPERIMENTS if name in folders]
+    if e1 and "e1_for_by_prevalence" in out:
+        rows = pd.concat([inference.e1_seed_rows(folders[n], paper.EXPERIMENTS[n]) for n in e1], ignore_index=True)
+        cells = pd.concat([inference.e1_claim_cells(folders[n]) for n in e1], ignore_index=True)
+        tables["e1_for_by_prevalence"] = inference.with_intervals(out["e1_for_by_prevalence"],
+                                                                  inference.e1_intervals(rows), inference.E1_KEYS)
+        tables["e1_paired_price"] = inference.e1_paired_price(rows)
+        tables["e1_paired_baselines"] = inference.e1_paired_baselines(rows)
+        tables["e1_violation_by_seed"] = inference.e1_violation_by_seed(cells)
+        tables["e1_violation_over_seeds"] = inference.e1_violation_over_seeds(cells)
+    # the start rules of the certificate on the calibration parts of the e13 runs, redrawn with this machine's numpy
+    if "e13" in folders:
+        tables["e1_start_rules"] = starts.start_rules_table(folders["e13"])
+    e3 = [name for name in ("e21", "e24") if name in folders]
+    if e3 and "e3_by_policy" in out:
+        rows = pd.concat([inference.e3_seed_rows(folders[n], paper.DATASETS[n]) for n in e3], ignore_index=True)
+        tables["e3_by_policy"] = inference.with_intervals(out["e3_by_policy"], inference.e3_intervals(rows),
+                                                          inference.E3_KEYS)
+        tables["e3_paired_arms"] = inference.e3_paired_arms(rows)
+    return tables
 
 
 def draw(tables: dict, folder: Path) -> list[str]:
