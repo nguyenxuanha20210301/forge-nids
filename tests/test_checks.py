@@ -2,6 +2,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib.collections import LineCollection
+from matplotlib.colors import to_rgba
+from matplotlib.lines import Line2D
 
 from forge import experiments, runs
 from forge.config import load_config
@@ -40,6 +43,20 @@ def write_and_read(tables: dict, folder):
     for name, table in tables.items():
         table.to_csv(folder / f"{name}.csv", index=False)
     return {p.stem: pd.read_csv(p) for p in sorted(folder.glob("*.csv"))}
+
+
+def legend_styles_differ(fig) -> bool:
+    # no two entries of the legend share a color, a line style and a marker, since a linewidth alone does not tell two
+    # lines apart. a point stands in the legend by its error bars and a band by its color
+    styles = []
+    for h in fig.legends[0].legend_handles:
+        if isinstance(h, Line2D):
+            styles.append((to_rgba(h.get_color()), h.get_linestyle(), h.get_marker()))
+        elif isinstance(h, LineCollection):
+            styles.append(("errorbar", to_rgba(h.get_color()[0])))
+        else:
+            styles.append((type(h).__name__, to_rgba(h.get_facecolor())))
+    return len(set(styles)) == len(styles)
 
 
 def test_e0_tables_keep_the_rows_of_the_runs_and_draw(tmp_path):
@@ -99,12 +116,24 @@ def test_e0_tables_keep_the_rows_of_the_runs_and_draw(tmp_path):
     read = write_and_read({"e0_certify_by_size": by_size, "e0_certify_by_prevalence": by_prev, "e0_online": on,
                            "e0_monitor_trace": trace}, tmp_path / "tables")
     fig = figures.e0_certify(read["e0_certify_by_prevalence"], read["e0_certify_by_size"])
-    assert len(fig.axes) == 3 and fig.axes[2].get_xscale() == "log"
+    assert len(fig.axes) == 3 and fig.axes[2].get_xscale() == "log" and legend_styles_differ(fig)
     assert all(p.stat().st_size > 0 for p in save_figure(fig, tmp_path / "figures", "e0_certify"))
     fig = figures.e0_online_and_monitor(read["e0_online"], read["e0_monitor_trace"])
     assert [ax.get_xlabel() for ax in fig.axes[:2]] == ["window, benign scores drifting",
                                                         "window, benign scores jumping"]
+    assert legend_styles_differ(fig)
     assert all(p.stat().st_size > 0 for p in save_figure(fig, tmp_path / "figures", "e0_online_and_monitor"))
+    # c ends as many flows after the alarm as the alarm came after the start of the violation at flow 100001, at the
+    # height of what it shows, and at the end of the stream when that lies beyond it or no alarm came
+    early = read["e0_monitor_trace"].assign(alarm=120000)
+    panel = figures.e0_online_and_monitor(read["e0_online"], early).axes[2]
+    shown = early[early["position"] <= 139999]
+    assert panel.get_xlim()[1] == pytest.approx(0.139999)
+    assert panel.get_ylim()[1] == pytest.approx(1.1 * max(shown.loc[shown["point"] == "audit", "upper"].max(),
+                                                          shown.loc[shown["point"] == "count", "attacks"].max(), 1))
+    for alarm in (250000, -1):
+        panel = figures.e0_online_and_monitor(read["e0_online"], early.assign(alarm=alarm)).axes[2]
+        assert panel.get_xlim()[1] == pytest.approx(0.3)
     plt.close("all")
 
 
@@ -138,6 +167,7 @@ def test_e3_bounds_over_time_reads_the_replay_of_each_dataset(tmp_path):
     fig = figures.e3_bounds_over_time(read["e3_bounds_over_time"])
     assert [ax.get_xlabel() for ax in fig.axes] == ["millions of dismissed sessions, AnoShift",
                                                    "millions of dismissed flows, UGR'16"]
+    assert legend_styles_differ(fig)
     assert all(p.stat().st_size > 0 for p in save_figure(fig, tmp_path / "figures", "e3_bounds_over_time"))
     plt.close("all")
     # a trace saved before the two streams has no stream in its keys and is read whole
@@ -166,5 +196,6 @@ def test_intro_for_by_prevalence_follows_the_example_of_the_proposal(tmp_path):
     labels = [t.get_text() for t in fig.legends[0].get_texts()]
     assert "real windows, LITNET-2020" in labels and "real windows, UGR'16" in labels
     assert {"miss rate 0.1%", "miss rate 1%", "miss rate 5%", r"$\varepsilon$"} <= set(labels)
+    assert legend_styles_differ(fig)
     assert all(p.stat().st_size > 0 for p in save_figure(fig, tmp_path / "figures", "intro_for_by_prevalence"))
     plt.close("all")

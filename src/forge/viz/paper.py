@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 from matplotlib.ticker import NullFormatter
 
 from forge.experiments import synthetic_certify, synthetic_online
@@ -390,9 +391,10 @@ ONLINE_SCENARIOS = {"gradual": "benign scores drifting", "abrupt": "benign score
 def e0_online_and_monitor(online: pd.DataFrame, trace: pd.DataFrame) -> plt.Figure:
     """a and b, Theorem 1b on the windows of e14 at the main window size and the composition its figures read, the
     share of draws whose threshold has FOR above epsilon in each window, the offline certificate, the online one on
-    the window's own scores and the online one of the window before, with the benign scores drifting and jumping.
-    c, Theorems 2 and 3 on one stream of e20, the true count of attacks among the dismissed flows, its two bounds,
-    epsilon times the dismissed flows, the start of the violation and the alarm."""
+    the window's own scores and the online one of the window before, with the benign scores drifting and jumping, the
+    windows after the jump behind a light band. c, Theorems 2 and 3 on one stream of e20, the true count of attacks
+    among the dismissed flows, its two bounds, epsilon times the dismissed flows, the start of the violation and the
+    alarm, up to as many flows after the alarm as the alarm came after the start of the violation."""
     style.use()
     fig, axes = plt.subplots(1, 3, figsize=(style.WIDTH_DOUBLE, 2.7))
     composition = synthetic_online.FIGURE_COMPOSITIONS["violation"]
@@ -408,7 +410,8 @@ def e0_online_and_monitor(online: pd.DataFrame, trace: pd.DataFrame) -> plt.Figu
                           label=synthetic_online.LABELS[method])
         ax.axhline(delta, color=style.GRAY, linestyle="--", linewidth=1, label=r"$\delta$")
         if len(g) and np.isfinite(g["shift_at"].iloc[0]):
-            ax.axvline(float(g["shift_at"].iloc[0]) - 0.5, color=style.GRAY, linestyle=":", linewidth=1)
+            ax.axvspan(float(g["shift_at"].iloc[0]) - 0.5, float(g["window"].max()) + 0.5, color=style.GRAY,
+                       alpha=0.15, linewidth=0)
         ax.set_ylim(-0.02, 1.02)
         ax.set_xlabel(f"window, {word}")
         layout.panel_letter(ax, letter)
@@ -429,17 +432,23 @@ def e0_online_and_monitor(online: pd.DataFrame, trace: pd.DataFrame) -> plt.Figu
             linewidth=1.2, label="upper bound")
     ax.plot([0, n_end / scale], [0, eps * n_end], color=style.GRAY, linestyle=":", linewidth=1,
             label=r"$\varepsilon$ times the dismissed flows")
-    if int(first["violation_start"]) > 0:
-        ax.axvline(int(first["violation_start"]) / scale, color=style.GRAY, linestyle="-.", linewidth=0.8)
-    if int(first["alarm"]) >= 0:
-        ax.axvline(int(first["alarm"]) / scale, color=color, linestyle="-.", linewidth=0.8)
-    ax.set_xlim(0, n_end / scale)
-    ax.set_ylim(0, 1.1 * max(float(audits["upper"].max()), float(counts["attacks"].max()), 1.0))
+    start, alarm = int(first["violation_start"]), int(first["alarm"])
+    if start > 0:
+        ax.axvline(start / scale, color=style.GRAY, linestyle="-.", linewidth=0.8)
+    if alarm >= 0:
+        ax.axvline(alarm / scale, color=color, linestyle="-.", linewidth=0.8)
+    # the alarm switches the policy off, so the panel ends as many flows after the alarm as the alarm came after the
+    # start of the violation, which leaves the stream before the violation a readable share of the height
+    end = min(n_end, 2 * alarm - start) if alarm > start > 0 else n_end
+    top = max(float(audits.loc[audits["position"] <= end, "upper"].max()),
+              float(counts.loc[counts["position"] <= end, "attacks"].max()), 1.0)
+    ax.set_xlim(0, end / scale)
+    ax.set_ylim(0, 1.1 * top)
     ax.set_xlabel("millions of dismissed flows")
     ax.set_ylabel("attacks")
     layout.panel_letter(ax, "c")
     handles = dict(zip(*reversed(ax.get_legend_handles_labels())))
-    marks = [(Line2D([], [], color=style.GRAY, linestyle=":", linewidth=1), "jump of the benign scores"),
+    marks = [(Patch(color=style.GRAY, alpha=0.15, linewidth=0), "windows after the jump of the benign scores"),
              (Line2D([], [], color=style.GRAY, linestyle="-.", linewidth=0.8), "start of the violation"),
              (Line2D([], [], color=color, linestyle="-.", linewidth=0.8), "alarm")]
     layout.legend_below(fig, axes[0], [synthetic_online.LABELS[m] for m in methods],
@@ -450,7 +459,7 @@ def e0_online_and_monitor(online: pd.DataFrame, trace: pd.DataFrame) -> plt.Figu
 def e3_bounds_over_time(table: pd.DataFrame) -> plt.Figure:
     """one stream of the real order per dataset, offline FORGE at the typical composition under the one sequence
     over the whole stream, with the true count of attacks among the dismissed traffic, its two bounds, epsilon times the
-    dismissed traffic, the first window of every period of the paper's restart rule as a dotted line and the alarm
+    dismissed traffic, the first window of every period of the paper's restart rule as a thin gray line and the alarm
     where the sequence fired."""
     style.use()
     datasets = [d for d in DATASET_LABELS if d in set(table["dataset"])]
@@ -465,6 +474,11 @@ def e3_bounds_over_time(table: pd.DataFrame) -> plt.Figure:
         first = g.iloc[0]
         n_end, eps = float(first["n_end"]), float(first["epsilon"])
         unit = DATASET_UNITS[dataset]
+        # the periods are drawn first so the count and the bounds lie over their lines, where the last periods of
+        # AnoShift crowd the end of the stream
+        period = windows["period"].to_numpy()
+        for w in np.flatnonzero(np.r_[False, period[1:] != period[:-1]]):
+            ax.axvline(windows["position"].iloc[w - 1] / scale, color=style.GRAY, linestyle="-", linewidth=0.6)
         # the count is known at the audited attacks and at the window ends, the bounds move at the audited attacks
         count = pd.concat([audits, windows]).sort_values("position", kind="stable")
         ax.plot(count["position"] / scale, count["attacks"], color=style.INK, linewidth=1,
@@ -476,9 +490,6 @@ def e3_bounds_over_time(table: pd.DataFrame) -> plt.Figure:
                 linewidth=1.2, label="upper bound")
         ax.plot([0, n_end / scale], [0, eps * n_end], color=style.GRAY, linestyle=":", linewidth=1,
                 label=r"$\varepsilon$ times the dismissed traffic")
-        period = windows["period"].to_numpy()
-        for w in np.flatnonzero(np.r_[False, period[1:] != period[:-1]]):
-            ax.axvline(windows["position"].iloc[w - 1] / scale, color=style.GRAY, linestyle=":", linewidth=0.6)
         if int(first["alarm"]) >= 0:
             ax.axvline(int(first["alarm"]) / scale, color=color, linestyle="-.", linewidth=0.8)
         ax.set_xlim(0, n_end / scale)
@@ -486,7 +497,7 @@ def e3_bounds_over_time(table: pd.DataFrame) -> plt.Figure:
         ax.set_xlabel(f"millions of dismissed {unit}, {DATASET_SHORT[dataset]}")
         layout.panel_letter(ax, letter)
     axes[0].set_ylabel("attacks")
-    extra = [(Line2D([], [], color=style.GRAY, linestyle=":", linewidth=0.6), "first window of a restart period")]
+    extra = [(Line2D([], [], color=style.GRAY, linestyle="-", linewidth=0.6), "first window of a restart period")]
     if (table["alarm"] >= 0).any():
         extra.append((Line2D([], [], color=style.color_for("forge_simplex"), linestyle="-.", linewidth=0.8), "alarm"))
     layout.legend_below(fig, axes[0], ["attacks among the dismissed traffic", "lower bound", "upper bound"], extra,
