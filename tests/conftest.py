@@ -10,6 +10,7 @@ import zipfile
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import matplotlib
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -20,6 +21,10 @@ from forge.config import load_config
 from forge.data import anoshift
 from forge.data.litnet2020 import capture_name
 from forge.paths import configs_dir
+
+# the figures of the tests are written to files only, and a desktop backend leaves window objects whose clean up can
+# raise inside a later test
+matplotlib.use("Agg")
 
 # archive, first flow end and attack codes of each published capture, the icmp flood archive holds two families
 PUBLISHED = [

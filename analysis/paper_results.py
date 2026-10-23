@@ -1,13 +1,18 @@
 """the tables and figures of the paper over seeds, from the pooled tables of e11, e12, e13, e13 at the paper's
 epsilon, e21, e22, e23, e24, e31 and e32 and the run folders of their seeds, the contracts of E7 recertified from the
-calibration counts of the e11, e12 and e13 runs.
+calibration counts of the e11, e12 and e13 runs, the checks of the theorems of E0 from one run each of e10, e14 and
+e20, the stream of seed 0 of e21 and e24 over time, the ablations of E9 from the runs of e19, and the FOR of one
+threshold against the prevalence for the introduction.
 
     python analysis/paper_results.py
     python analysis/paper_results.py --out results --e21 20261014-232506_44dd25a --audit-rate 0.005
+    python analysis/paper_results.py --e10 <run id> --e14 <run id> --e20 <run id>
 
 the pooled tables come from analysis/pool_seeds.py under pooled/ of the storage root, and E7 reads the run folder of
 every seed behind them. its monitoring stage on AnoShift reads the e21 runs of the pooled folder, or, when there is
-no pooled e21 or --e21 names a run, that one run, the latest finished one unless named. the tables go to
+no pooled e21 or --e21 names a run, that one run, the latest finished one unless named. E0 reads the latest finished
+run of e10, e14 and e20 in the runs folder unless --e10, --e14 or --e20 names one, and E9 the latest finished run of
+every variant of e19, with the e23 run of seed 0 as the base of the Blaster rows. the tables go to
 results/tables and the figures to results/figures of the repository unless --out names another folder, the tables
 first, and every figure is drawn from the written tables alone. an experiment whose pooled folder is missing is left
 out with a line, and the tables and figures that need it are skipped.
@@ -19,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 
 from forge import paths, runs
-from forge.eval import contract, inference, paper, seeds, starts
+from forge.eval import checks, contract, inference, paper, seeds, starts, variants
 from forge.viz import paper as figures
 from forge.viz.export import save_figure
 
@@ -88,7 +93,74 @@ def tables_of(pooled: dict, args) -> dict:
             monitoring.append(paper.e7_monitoring(paper.run_folders(pooled[n], paper.EXPERIMENTS[n])))
     if monitoring:
         out["e7_monitoring"] = pd.concat(monitoring, ignore_index=True)
+    out.update(one_run_tables(pooled, args, out))
+    out["intro_for_by_prevalence"] = paper.intro_for_by_prevalence()
     return out
+
+
+def settings_row(experiment: str, dataset: str, folders: list[Path]) -> dict:
+    # the settings of an experiment read from one run, with its first and last run id, for the runs read one by one
+    summary = runs.load_json(folders[0], "summary")
+    row = {"experiment": experiment, "dataset": dataset, "seeds": 1,
+           "first_run": min(f.name for f in folders), "last_run": max(f.name for f in folders)}
+    names = {"epsilon": "epsilon", "delta": "delta", "pi_max": "pi_max", "calibration_prevalence": "prevalence"}
+    for column, key in names.items():
+        value = summary.get(column, summary.get(key))
+        if isinstance(value, (int, float)):
+            row[column] = value
+    return row
+
+
+def one_run_tables(pooled: dict, args, out: dict) -> dict:
+    """the tables read from single runs rather than from pooled seeds, the checks of the theorems of E0, the stream of
+    seed 0 of e21 and e24 over time for E3 and the ablations of E9, each experiment added to the settings with its
+    runs. a run that is missing leaves its tables out with a line."""
+    tables, rows = {}, []
+    checked = {}
+    for experiment, run_id in ((checks.E10, args.e10), (checks.E14, args.e14), (checks.E20, args.e20)):
+        folder = latest_run(experiment, run_id)
+        if folder is not None:
+            checked[experiment] = folder
+            rows.append(settings_row(experiment, "synthetic", [folder]))
+    if checks.E10 in checked:
+        tables["e0_certify_by_size"] = checks.certify_by_size(checked[checks.E10])
+        tables["e0_certify_by_prevalence"] = checks.certify_by_prevalence(checked[checks.E10])
+    if checks.E14 in checked:
+        tables["e0_online"] = checks.online(checked[checks.E14])
+    if checks.E20 in checked:
+        tables["e0_monitor"] = checks.monitor(checked[checks.E20])
+        tables["e0_monitor_adaptive"] = checks.monitor_adaptive(checked[checks.E20])
+        tables["e0_monitor_trace"] = checks.monitor_trace(checked[checks.E20])
+    # the stream of seed 0 of every pooled monitoring experiment on a dataset of E3
+    traced = {}
+    for name in ("e21", "e24"):
+        if name in pooled:
+            found = paper.run_folders(pooled[name], paper.EXPERIMENTS[name])
+            if 0 in found:
+                traced[paper.DATASETS[name]] = found[0]
+    if traced:
+        tables["e3_bounds_over_time"] = paper.e3_bounds_over_time(traced)
+    ablations = variants.e19_table()
+    if len(ablations):
+        tables["e9_ablations"] = ablations.drop(columns=["seconds"])
+        rows.append(settings_row(variants.E19, "litnet2020",
+                                 [paths.runs_dir() / variants.E19 / r for r in ablations["run_id"]]))
+    else:
+        print(f"{variants.E19} has no finished run in the runs folder, left out")
+    # the Blaster worm held out under the feature sets of e19, against the e23 run of seed 0 as the base
+    base = None
+    if "e23" in pooled:
+        found = paper.run_folders(pooled["e23"], paper.EXPERIMENTS["e23"])
+        base = found[0].name if 0 in found else None
+    blaster = variants.blaster_table(base_run=base)
+    if len(blaster):
+        tables["e9_blaster_unseen"] = blaster
+        held = [paths.runs_dir() / variants.E19_BLASTER / r for r in blaster["run_id"] if r != base]
+        if held:
+            rows.append(settings_row(variants.E19_BLASTER, "litnet2020", held))
+    if rows:
+        tables["settings"] = pd.concat([out["settings"], pd.DataFrame(rows)], ignore_index=True)
+    return tables
 
 
 def statistics(pooled: dict, out: dict) -> dict:
@@ -164,6 +236,16 @@ def draw(tables: dict, folder: Path) -> list[str]:
             read.get("e7_certification", pd.DataFrame()), read.get("e7_monitoring", pd.DataFrame()))))
     if "e7_contract" in read:
         drawn.append(("e7_dismissed_by_contract", figures.e7_dismissed_by_contract(read["e7_contract"])))
+    if "intro_for_by_prevalence" in read:
+        drawn.append(("intro_for_by_prevalence", figures.intro_for_by_prevalence(read["intro_for_by_prevalence"],
+                                                                                 read.get("e2_natural"))))
+    if "e0_certify_by_prevalence" in read and "e0_certify_by_size" in read:
+        drawn.append(("e0_certify", figures.e0_certify(read["e0_certify_by_prevalence"], read["e0_certify_by_size"])))
+    if "e0_online" in read and "e0_monitor_trace" in read:
+        drawn.append(("e0_online_and_monitor", figures.e0_online_and_monitor(read["e0_online"],
+                                                                             read["e0_monitor_trace"])))
+    if "e3_bounds_over_time" in read:
+        drawn.append(("e3_bounds_over_time", figures.e3_bounds_over_time(read["e3_bounds_over_time"])))
     names = []
     for name, fig in drawn:
         save_figure(fig, folder.parent / "figures", name)
@@ -177,6 +259,9 @@ def main() -> None:
     parser.add_argument("--pooled", type=Path, default=None, help="the pooled folder, pooled/ under the storage root")
     parser.add_argument("--e21", default=None, metavar="RUN_ID", help="the e21 run of the monitoring stage of E7")
     parser.add_argument("--audit-rate", type=float, default=0.005)
+    parser.add_argument("--e10", default=None, metavar="RUN_ID", help="the e10 run of the checks of Theorem 1")
+    parser.add_argument("--e14", default=None, metavar="RUN_ID", help="the e14 run of the checks of Theorem 1b")
+    parser.add_argument("--e20", default=None, metavar="RUN_ID", help="the e20 run of the checks of Theorems 2 and 3")
     args = parser.parse_args()
     out = args.out or paths.repo_root() / "results"
     pooled_root = args.pooled or paths.storage_root() / "pooled"

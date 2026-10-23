@@ -271,3 +271,58 @@ def scalar(table: pd.DataFrame, column: str, default=np.nan):
     if column not in table or table[column].dropna().empty:
         return default
     return table[column].dropna().iloc[0]
+
+
+def e3_bounds_over_time(folders: dict) -> pd.DataFrame:
+    """the trace of one run of e21 or e24 per dataset, folders mapping a dataset to its run folder, on the stream the
+    paper reads, for the policy and the composition the config names for the trace, at its first draw, under the one
+    sequence over the whole stream. two kinds of rows, the audited attacks, where the bounds move, with the true count
+    and both bounds there, and the window ends with the true count and the period the restart rule of the paper
+    follows, the year on AnoShift and the week on UGR16. epsilon, the end of the stream and the alarm come as
+    columns, the alarm -1 where the sequence never fired."""
+    parts = []
+    for dataset, folder in folders.items():
+        folder = Path(folder)
+        arrays = runs.load_arrays(folder, "trace")
+        summary = runs.load_json(folder, "summary")
+        found = sorted({key.split("|", 1)[0] for key in arrays if "|" in key})
+        stream = PAPER_STREAM if PAPER_STREAM in found else (found[0] if found else None)
+        t = {k.split("|", 1)[1]: v for k, v in arrays.items() if k.startswith(f"{stream}|")} if stream else arrays
+        period = t["years"] if "years" in t else t.get("segments", np.zeros(len(t["ends"]), dtype=np.int64))
+        audits = pd.DataFrame({"point": "audit", "position": t["ev_pos"], "attacks": t["ev_count"],
+                               "lower": t["lcb"], "upper": t["ucb"]})
+        ends = pd.DataFrame({"point": "window", "position": t["ends"], "attacks": t["cum_attacks"],
+                             "window": np.arange(len(t["ends"])), "period": period})
+        table = pd.concat([audits, ends], ignore_index=True)
+        trace = summary.get("trace", {})
+        lead = {"dataset": dataset, "run_id": folder.name, "seed": runs.load_run_config(folder).get("seed", 0),
+                "stream": stream or "", "policy": trace.get("policy"), "composition": trace.get("composition")}
+        for k, (name, value) in enumerate(lead.items()):
+            table.insert(k, name, value)
+        table["epsilon"] = summary["epsilon"]
+        table["n_end"] = int(t["n_end"])
+        table["alarm"] = int(t["alarm_pos"])
+        parts.append(table)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+# the operating point of the example of proposal 2.2, a miss rate of 1% at 90% of the benign flows dismissed, beside a
+# tighter and a looser miss rate, at the paper's epsilon
+INTRO_MISS_RATES = (0.001, 0.01, 0.05)
+INTRO_BENIGN = 0.9
+INTRO_EPSILON = 0.001
+
+
+def intro_for_by_prevalence(miss_rates=INTRO_MISS_RATES, benign: float = INTRO_BENIGN, epsilon: float = INTRO_EPSILON,
+                            prevalences=None) -> pd.DataFrame:
+    """the FOR of one threshold against the prevalence, pi m / (pi m + (1 - pi) b), for a few miss rates m at one
+    benign share dismissed b, with the largest prevalence at which each keeps FOR at or below epsilon,
+    epsilon b / (m (1 - epsilon) + epsilon b), the same at every row of a miss rate."""
+    pis = np.geomspace(1e-4, 0.3, 161) if prevalences is None else np.asarray(prevalences, dtype=float)
+    rows = []
+    for m in miss_rates:
+        crossing = epsilon * benign / (m * (1 - epsilon) + epsilon * benign)
+        rows += [{"miss_rate": m, "benign_dismissed": benign, "prevalence": float(pi),
+                  "for": float(pi * m / (pi * m + (1 - pi) * benign)), "epsilon": epsilon, "crossing": crossing}
+                 for pi in pis]
+    return pd.DataFrame(rows)
