@@ -199,3 +199,95 @@ def test_intro_for_by_prevalence_follows_the_example_of_the_proposal(tmp_path):
     assert legend_styles_differ(fig)
     assert all(p.stat().st_size > 0 for p in save_figure(fig, tmp_path / "figures", "intro_for_by_prevalence"))
     plt.close("all")
+
+
+def case_study_runs(root, threshold=6.0):
+    # a small e13 run whose certificate on its expected calibration set lands at index 6 of ten thresholds, the
+    # families passing with no miss up to there and failing from index 7 on, and an e24 run that read that threshold
+    g = 10
+    b_cal = (np.arange(g) + 1) / g
+    miss = np.where(np.arange(g) >= 7, 0.5, 0.0)
+    grid = pd.DataFrame({"index": np.arange(g), "threshold": np.linspace(-9, 0, g), "selection_benign": b_cal,
+                         "selection_attack": miss, "calibration_benign": b_cal, "calibration_attack": miss,
+                         "calibration_dos": miss, "calibration_anomaly_spam": miss})
+    roles = pd.DataFrame({"role": ["train", "selection", "calibration", "deployment"],
+                          "start": ["2016-07-27 12:00:00", "2016-08-01 00:00:00", "2016-08-04 12:00:00",
+                                    "2016-08-08 00:00:00"],
+                          "end": ["2016-08-01 00:00:00", "2016-08-04 12:00:00", "2016-08-08 00:00:00",
+                                  "2016-08-09 00:00:00"],
+                          "windows": [18, 14, 14, 4], "flows": [100000, 80000, 50000, 40000],
+                          "benign": [99000, 79000, 49000, 39000], "attacks": [1000, 1000, 1000, 1000]})
+    starts = pd.date_range("2016-08-08 00:00", periods=4, freq="6h")
+    windows = pd.DataFrame({"window": np.arange(4), "start": starts.astype(str), "end": (starts + pd.Timedelta(hours=6)).astype(str),
+                            "in_claim": True, "has_attacks": [True, True, False, True],
+                            "flows": [10000, 10000, 10000, 10000], "benign": [9500, 9900, 10000, 9990],
+                            "dos": [400, 0, 0, 0], "scan11": [0, 0, 0, 0], "scan44": [0, 0, 0, 0],
+                            "nerisbotnet": [0, 0, 0, 0], "anomaly_spam": [100, 100, 0, 10],
+                            "natural_prevalence": [0.05, 0.01, 0.0, 0.001], "auc": [0.99, 0.98, np.nan, 0.97],
+                            "forge_benign_dismissed": [0.7, 0.71, 0.72, 0.7],
+                            "forge_miss_dos": [0.0, np.nan, np.nan, np.nan], "forge_miss_anomaly_spam": [0.01, 0.0, np.nan, 0.0]})
+    summary = {"epsilon": 0.05, "delta": 0.05, "delta_benign": 0.025, "pi_max": 0.1, "start": "share",
+               "start_share": 0.5, "start_misses": 2, "start_slack": 0.05, "families": [["dos"], ["anomaly_spam"]],
+               "calibration_expected_attacks": {"dos": 400.0, "anomaly_spam": 600.0}, "calibration_prevalence": 0.02,
+               "calibration_sessions": 50000, "family_minimum": 10, "offline_refused": {"forge_simplex": 0.0},
+               "selection_auc": 0.99, "calibration_auc": 0.97}
+    e13 = fake_run(root, "e13_ugr16_prevalence", "20261022-144455_7157a7b", {"seed": 0},
+                   tables=[("grid", grid), ("roles", roles), ("windows", windows)], summary=summary)
+    rows = []
+    for stream in ("simulated", "replay"):
+        for policy in ("forge_simplex", "ltt_iid"):
+            for composition in ("typical", "natural"):
+                for w in range(4):
+                    rows.append({"stream": stream, "policy": policy, "composition": composition, "window": w,
+                                 "start": str(starts[w]), "segment": w // 2, "prevalence": 0.02, "subsampled": False,
+                                 "window_sessions": 10000, "refused_rate": 0.0,
+                                 "threshold_mean": threshold if policy == "forge_simplex" else 8.0,
+                                 "dismissed_share_mean": 0.7 + 0.01 * w, "for_true_mean": 0.001 * (w + 1),
+                                 "violated_rate": 0.0, "attacks_mean": 7.0 + w, "realized_for_mean": 0.001,
+                                 "state_certified": 0.9, "state_running": 0.1, "state_violation": 0.0,
+                                 "window_audit_alarm_rate": 0.0})
+    by_window = pd.DataFrame(rows)
+    claims = pd.DataFrame([{"stream": stream, "policy": policy, "composition": composition, "arm": arm,
+                            "draws": 10, "alarm_rate": 0.0 if arm != "naive" else 0.3, "leak_median": 30.0,
+                            "sessions_median": 28000.0, "audits_mean": 140.0, "blocks_certified_mean": 3.6}
+                           for stream in ("simulated", "replay") for policy in ("forge_simplex", "ltt_iid")
+                           for composition in ("typical", "natural")
+                           for arm in ("naive", "none", "monitor_week", "monitor")])
+    e24 = fake_run(root, "e24_ugr16_streams", "20261021-104508_825dea4", {"seed": 0},
+                   tables=[("by_window", by_window), ("claims", claims)],
+                   summary={"epsilon": 0.05, "audit_rate": 0.005, "segments": {"first_window": [0, 2]}})
+    return e13, e24
+
+
+def test_case_study_tables_read_seed_0_and_draw(tmp_path):
+    e13, e24 = case_study_runs(tmp_path)
+    certificate = paper.case_study_certificate(e13, e24)
+    items = certificate.set_index("item")["value"]
+    assert float(items["certified_index"]) == 6 and float(items["certified_benign_quantile"]) == pytest.approx(0.7)
+    assert float(items["benign_lower_bound"]) == pytest.approx(0.7 - np.sqrt(np.log(40) / (2 * 49000)))
+    assert float(items["floor"]) == pytest.approx(0.9 * float(items["benign_lower_bound"]))
+    assert float(items["dos_attacks"]) == 400 and float(items["dos_misses"]) == 0
+    assert 0 < float(items["anomaly_spam_miss_upper"]) < 0.01 and float(items["bound"]) <= 0.05
+    assert float(items["next_index"]) == 7 and float(items["next_bound"]) > 0.05
+    assert items["next_binding_family"] in ("dos", "anomaly_spam") and float(items["next_binding_miss_rate"]) == 0.5
+    assert set(certificate["run_id"]) == {e13.name} and set(certificate["seed"]) == {0}
+    # the e24 run read another threshold than the one recomputed from the certification run
+    with pytest.raises(ValueError):
+        paper.case_study_certificate(*case_study_runs(tmp_path / "other", threshold=5.0))
+    windows = paper.case_study_windows(e13, e24)
+    assert len(windows) == 4 and set(windows["stream"]) == {"replay"} and set(windows["composition"]) == {"natural"}
+    assert windows["dos"].tolist() == [400, 0, 0, 0] and windows["segment"].tolist() == [0, 0, 1, 1]
+    assert windows["state_certified"].tolist() == [0.9] * 4 and windows["threshold_mean"].tolist() == [6.0] * 4
+    assert windows["forge_miss_dos"].iloc[0] == 0.0 and windows["forge_miss_anomaly_spam"].iloc[0] == 0.01
+    stream = paper.case_study_stream(e24)
+    assert stream["arm"].tolist() == ["monitor", "monitor_week", "none", "naive"]
+    assert set(stream["epsilon"]) == {0.05} and set(stream["audit_rate"]) == {0.005}
+    read = write_and_read({"case_study_certificate": certificate, "case_study_windows": windows,
+                           "case_study_stream": stream}, tmp_path / "tables")
+    rows = paper.case_study_figure_rows(read["case_study_windows"], read["case_study_certificate"])
+    assert set(rows["epsilon"]) == {0.05} and set(rows["pi_max"]) == {0.1}
+    fig = figures.case_study_by_clock(rows)
+    assert len(fig.axes) == 3 and fig.axes[2].get_xlabel() == "window start, August 2016"
+    assert legend_styles_differ(fig)
+    assert all(p.stat().st_size > 0 for p in save_figure(fig, tmp_path / "figures", "case_study_by_clock"))
+    plt.close("all")

@@ -140,6 +140,15 @@ def one_run_tables(pooled: dict, args, out: dict) -> dict:
                 traced[paper.DATASETS[name]] = found[0]
     if traced:
         tables["e3_bounds_over_time"] = paper.e3_bounds_over_time(traced)
+    # the case study, the certificate of seed 0 of e13 on the calibration part of UGR16 and its stream through the
+    # deployment in the e24 run of the same seed
+    if "e13" in pooled and "e24" in pooled:
+        certified = paper.run_folders(pooled["e13"], paper.EXPERIMENTS["e13"])
+        streamed = paper.run_folders(pooled["e24"], paper.EXPERIMENTS["e24"])
+        if 0 in certified and 0 in streamed:
+            tables["case_study_certificate"] = paper.case_study_certificate(certified[0], streamed[0])
+            tables["case_study_windows"] = paper.case_study_windows(certified[0], streamed[0])
+            tables["case_study_stream"] = paper.case_study_stream(streamed[0])
     ablations = variants.e19_table()
     if len(ablations):
         tables["e9_ablations"] = ablations.drop(columns=["seconds"])
@@ -246,6 +255,9 @@ def draw(tables: dict, folder: Path) -> list[str]:
                                                                              read["e0_monitor_trace"])))
     if "e3_bounds_over_time" in read:
         drawn.append(("e3_bounds_over_time", figures.e3_bounds_over_time(read["e3_bounds_over_time"])))
+    if "case_study_windows" in read and "case_study_certificate" in read:
+        drawn.append(("case_study_by_clock", figures.case_study_by_clock(
+            paper.case_study_figure_rows(read["case_study_windows"], read["case_study_certificate"]))))
     names = []
     for name, fig in drawn:
         save_figure(fig, folder.parent / "figures", name)

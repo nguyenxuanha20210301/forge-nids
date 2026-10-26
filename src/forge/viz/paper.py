@@ -5,6 +5,7 @@ alone. a point is the median over seeds and its bar the 5% to 95% range over see
 the draws of every seed.
 """
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -12,6 +13,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.ticker import NullFormatter
 
+from forge.data import ugr16
 from forge.experiments import synthetic_certify, synthetic_online
 from forge.experiments.litnet_prevalence import EVERY_LINE, LABELS, MARKERS, METHODS
 from forge.experiments.monitor_streams import POLICY_LABELS, _policy_line
@@ -502,4 +504,75 @@ def e3_bounds_over_time(table: pd.DataFrame) -> plt.Figure:
         extra.append((Line2D([], [], color=style.color_for("forge_simplex"), linestyle="-.", linewidth=0.8), "alarm"))
     layout.legend_below(fig, axes[0], ["attacks among the dismissed traffic", "lower bound", "upper bound"], extra,
                         ncol=2)
+    return fig
+
+
+# the families of UGR16 in the order the case study figure draws them, and the states of the monitor
+CASE_FAMILIES = ("dos", "scan11", "scan44", "nerisbotnet", "anomaly_spam")
+CASE_MARKERS = ("o", "s", "^", "P", "X")
+
+
+def case_study_by_clock(windows: pd.DataFrame) -> plt.Figure:
+    """the deployment of the case study by the clock, one point per window of six hours: (a) the attacks of every
+    family in the window on a log axis, (b) the natural prevalence of the window and the FOR at the certified
+    threshold on one log axis against pi_max and epsilon, (c) the share of the window
+    dismissed and the share of draws in which the monitor reads the window certified by audit at its end, with the
+    first window of every week of the operating rule as a thin gray line."""
+    style.use()
+    t = windows.sort_values("window").reset_index(drop=True)
+    x = pd.to_datetime(t["start"])
+    fig, axes = plt.subplots(3, 1, figsize=(style.WIDTH_SINGLE, 5.4), sharex=True)
+    weeks = t["segment"].to_numpy()
+    starts = [x.iloc[w] for w in np.flatnonzero(np.r_[False, weeks[1:] != weeks[:-1]])]
+    for ax in axes:
+        for s in starts:
+            ax.axvline(s, color=style.GRAY, linestyle="-", linewidth=0.6)
+    a, b, c = axes
+    families = [f for f in CASE_FAMILIES if f in t.columns]
+    for k, f in enumerate(families):
+        counts = t[f].to_numpy(dtype=float)
+        shown = np.where(counts > 0, counts, np.nan)
+        a.plot(x, shown, color=style.COLORS[k], marker=CASE_MARKERS[k % len(CASE_MARKERS)],
+               markersize=2.5, linewidth=0.9, label=ugr16.FAMILY_LABELS.get(f, f))
+    a.set_yscale("log")
+    a.set_ylabel("attacks in the window")
+    layout.panel_letter(a, "a")
+    prevalence = t["natural_prevalence"].to_numpy(dtype=float)
+    for_true = t["for_true_mean"].to_numpy(dtype=float)
+    b.plot(x, np.where(prevalence > 0, prevalence, np.nan), color=style.INK, marker="o", markersize=2.5,
+           linewidth=0.9, label="prevalence of the window")
+    b.plot(x, np.where(for_true > 0, for_true, np.nan), color=style.color_for("forge_simplex"), marker="v",
+           markersize=2.5, linewidth=0.9, label="FOR at the threshold")
+    eps = float(t["epsilon"].iloc[0]) if "epsilon" in t else np.nan
+    pi_max = float(t["pi_max"].iloc[0]) if "pi_max" in t else np.nan
+    if np.isfinite(pi_max):
+        b.axhline(pi_max, color=style.GRAY, linestyle="-.", linewidth=0.9, label=r"$\pi_{\max}$")
+    if np.isfinite(eps):
+        b.axhline(eps, color=style.GRAY, linestyle="--", linewidth=0.9, label=r"$\varepsilon$")
+    b.set_yscale("log")
+    b.set_ylabel("share of the window")
+    layout.panel_letter(b, "b")
+    c.plot(x, t["dismissed_share_mean"], color=style.color_for("forge_simplex"), marker="D", markersize=2.5,
+           linewidth=0.9, label="share dismissed")
+    c.plot(x, t["state_certified"], color=style.INK, marker="s", markersize=2.5, linewidth=0.9, linestyle="--",
+           label="draws certified by audit")
+    c.set_ylim(0, 1.05)
+    c.yaxis.set_major_formatter(style.percent)
+    c.set_ylabel("share")
+    c.set_xlabel("window start, August 2016")
+    c.xaxis.set_major_locator(mdates.DayLocator(interval=3))
+    c.xaxis.set_major_formatter(mdates.DateFormatter("%d"))
+    layout.panel_letter(c, "c")
+    extra = [(Line2D([], [], color=style.GRAY, linestyle="-", linewidth=0.6), "first window of a week")]
+    handles, labels = [], []
+    for ax in axes:
+        h, l = ax.get_legend_handles_labels()
+        handles += h
+        labels += l
+    fig.tight_layout()
+    entries = list(zip(handles, labels)) + extra
+    ncol = 2
+    rows = -(-len(entries) // ncol)
+    order = [r * ncol + k for k in range(ncol) for r in range(rows) if r * ncol + k < len(entries)]
+    fig.legend(*zip(*[entries[i] for i in order]), loc="upper center", ncol=ncol, bbox_to_anchor=(0.5, 0.0))
     return fig

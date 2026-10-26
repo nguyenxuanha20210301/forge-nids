@@ -11,6 +11,10 @@ import numpy as np
 import pandas as pd
 
 from forge import paths, runs
+from forge.certify import certificate
+from forge.certify.bounds import clopper_pearson_upper, dkw_margin
+from forge.certify.certificate import for_from_rates
+from forge.data import ugr16
 from forge.eval import seeds, workload
 
 # the pooled folder of each experiment the paper reads, under pooled/ of the storage root. e13_floor is e13 at the
@@ -304,6 +308,148 @@ def e3_bounds_over_time(folders: dict) -> pd.DataFrame:
         table["alarm"] = int(t["alarm_pos"])
         parts.append(table)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+# the case study of the paper, the certificate of seed 0 on the calibration part of UGR16 and its stream through the
+# deployment by the clock, the policy and the composition the case study reads
+CASE_POLICY = "forge_simplex"
+CASE_COMPOSITION = "natural"
+CASE_ARMS = ("monitor", "monitor_week", "monitor_window", "any_start", "none", "window_audit", "naive")
+
+
+def case_study_certificate(folder, streams_folder=None) -> pd.DataFrame:
+    """the certificate of one e13 run as an operator reads it, recomputed on the expected calibration set from the
+    grid and the summary of the run with the certificate's own functions, one row per item. the terms of the
+    contract, the calibration part, the start, the grid, the certified threshold with its score, its benign quantile,
+    its lower benign bound and its floor, then per family the expected calibration attacks, the misses at the
+    threshold, the miss rate, its upper bound and the worst case FOR at pi_max it gives, and the bound of the
+    certificate against epsilon. streams_folder names the e24 run that read the certificate, whose threshold index is
+    checked against the recomputed one."""
+    folder = Path(folder)
+    summary = runs.load_json(folder, "summary")
+    grid = runs.load_table(folder, "grid")
+    roles = runs.load_table(folder, "roles").set_index("role")
+    eps, delta, pi_max = float(summary["epsilon"]), float(summary["delta"]), float(summary["pi_max"])
+    part_b = float(summary["delta_benign"])
+    part_m = delta - part_b
+    names = ["+".join(g) for g in summary["families"]]
+    expected = np.array([sum(float(summary["calibration_expected_attacks"][f]) for f in g)
+                         for g in summary["families"]])
+    n_benign = float(roles.loc["calibration", "benign"])
+    b_cal = grid["calibration_benign"].to_numpy(dtype=float)
+    m_cal = np.stack([sum(grid[f"calibration_{f}"].to_numpy(dtype=float) * summary["calibration_expected_attacks"][f]
+                          for f in g) / e for g, e in zip(summary["families"], expected)])
+    start = certificate.start_settings(summary)
+    out = certificate.certify((b_cal * n_benign)[None], np.array([n_benign]), (m_cal * expected[:, None])[None],
+                              expected[None], eps, delta, pi_max, delta_benign=part_b, **start)
+    index = int(out["index"][0])
+    if index < 0:
+        raise ValueError(f"the certificate of {folder.name} refuses on its expected calibration set")
+    if streams_folder is not None:
+        by_window = runs.load_table(streams_folder, "by_window")
+        read = by_window.loc[(by_window["policy"] == CASE_POLICY) & by_window["threshold_mean"].notna(),
+                             "threshold_mean"]
+        if len(read) and not np.allclose(read, index):
+            raise ValueError(f"{Path(streams_folder).name} read the threshold {read.iloc[0]} of {CASE_POLICY}, "
+                             f"the certificate recomputed from {folder.name} gives {index}")
+    margin = float(dkw_margin(n_benign, part_b))
+    b_lower = max(b_cal[index] - margin, 0.0)
+    # the threshold after the certified one, where the walk stopped, with the family whose bound stopped it
+    uppers = np.stack([clopper_pearson_upper(m_cal[k] * expected[k], expected[k], part_m) for k in range(len(names))])
+    bounds = for_from_rates(pi_max, uppers.max(0), np.clip(b_cal - margin, 0, None))
+    after = index + 1 if index + 1 < len(grid) else index
+    rows = [("epsilon", eps, ""), ("delta", delta, ""), ("delta_benign", part_b, ""), ("delta_family", part_m, ""),
+            ("pi_max", pi_max, ""),
+            ("calibration_start", roles.loc["calibration", "start"], "clock"),
+            ("calibration_end", roles.loc["calibration", "end"], "clock"),
+            ("calibration_flows", float(roles.loc["calibration", "flows"]), "flows"),
+            ("calibration_benign", n_benign, "flows"),
+            ("calibration_prevalence", float(summary["calibration_prevalence"]), "share"),
+            ("calibration_set_flows", float(summary["calibration_sessions"]), "flows"),
+            ("families", float(len(names)), "count"),
+            ("family_minimum", float(summary["family_minimum"]), "attacks"),
+            ("grid_thresholds", float(len(grid)), "count"),
+            ("start_rule", summary.get("start", "feasible"), ""),
+            ("start_share", float(summary.get("start_share", np.nan)), "share"),
+            ("certified_index", float(index), "index"),
+            ("certified_score", float(grid["threshold"].iloc[index]), "score"),
+            ("certified_benign_quantile", float(b_cal[index]), "share"),
+            ("benign_margin", margin, "share"),
+            ("benign_lower_bound", b_lower, "share"),
+            ("floor", (1 - pi_max) * b_lower, "share"),
+            ("bound", float(out["bound"][0]), "share"),
+            ("next_index", float(after), "index"),
+            ("next_benign_quantile", float(b_cal[after]), "share"),
+            ("next_bound", float(bounds[after]), "share"),
+            ("next_binding_family", names[int(np.argmax(uppers[:, after]))], ""),
+            ("next_binding_miss_rate", float(m_cal[int(np.argmax(uppers[:, after])), after]), "share"),
+            ("refused_share", float(summary["offline_refused"][CASE_POLICY]), "share"),
+            ("selection_auc", float(summary["selection_auc"]), ""),
+            ("calibration_auc", float(summary["calibration_auc"]), "")]
+    for k, name in enumerate(names):
+        misses = float(m_cal[k, index] * expected[k])
+        upper = float(clopper_pearson_upper(misses, expected[k], part_m))
+        rows += [(f"{name}_attacks", expected[k], "attacks"), (f"{name}_misses", misses, "attacks"),
+                 (f"{name}_miss_rate", float(m_cal[k, index]), "share"), (f"{name}_miss_upper", upper, "share"),
+                 (f"{name}_for_at_pi_max", float(for_from_rates(pi_max, upper, b_lower)), "share")]
+    table = pd.DataFrame(rows, columns=["item", "value", "unit"])
+    table.insert(0, "run_id", folder.name)
+    table.insert(1, "seed", int(runs.load_run_config(folder).get("seed", 0)))
+    return table
+
+
+def case_study_windows(folder, streams_folder) -> pd.DataFrame:
+    """the deployment of the case study window by window, the attacks per family, the natural prevalence and the
+    AUC of every window with the benign share dismissed and the miss rate per family at the certified threshold
+    from the e13 run, and from the e24 run on the replay of the real order under the policy and
+    at the composition of the case study the share dismissed, the FOR at the certified threshold, the attacks among the
+    dismissed flows, the realized FOR and the monitor's state at the window's end under one sequence over the
+    deployment, with the week of the operating rule."""
+    windows = runs.load_table(folder, "windows")
+    by_window = runs.load_table(streams_folder, "by_window")
+    stream = PAPER_STREAM if PAPER_STREAM in set(by_window["stream"]) else sorted(set(by_window["stream"]))[0]
+    rows = by_window[(by_window["stream"] == stream) & (by_window["policy"] == CASE_POLICY)
+                     & (by_window["composition"] == CASE_COMPOSITION)].sort_values("window")
+    keep = ["window", "segment", "window_sessions", "threshold_mean", "dismissed_share_mean", "for_true_mean",
+            "violated_rate", "attacks_mean", "realized_for_mean", "state_certified", "state_running",
+            "state_violation", "window_audit_alarm_rate"]
+    families = [c for c in windows.columns if c in ugr16.ATTACK_FAMILIES]
+    misses = [c for c in windows.columns if c.startswith("forge_miss_")]
+    left = windows[["window", "start", "end", "flows", "benign", *families, "natural_prevalence", "auc",
+                    "forge_benign_dismissed", *misses]]
+    table = left.merge(rows[keep], on="window", how="left")
+    table.insert(0, "stream", stream)
+    table.insert(1, "policy", CASE_POLICY)
+    table.insert(2, "composition", CASE_COMPOSITION)
+    table.insert(3, "certification_run", Path(folder).name)
+    table.insert(4, "streams_run", Path(streams_folder).name)
+    return table
+
+
+def case_study_stream(streams_folder) -> pd.DataFrame:
+    """the stream of the case study under every monitoring arm, the claims rows of the e24 run on the replay under
+    the policy and at the composition of the case study, with the epsilon and the audit rate of the run."""
+    claims = runs.load_table(streams_folder, "claims")
+    summary = runs.load_json(streams_folder, "summary")
+    stream = PAPER_STREAM if PAPER_STREAM in set(claims["stream"]) else sorted(set(claims["stream"]))[0]
+    rows = claims[(claims["stream"] == stream) & (claims["policy"] == CASE_POLICY)
+                  & (claims["composition"] == CASE_COMPOSITION) & claims["arm"].isin(CASE_ARMS)].copy()
+    rows["arm"] = pd.Categorical(rows["arm"], [a for a in CASE_ARMS if a in set(rows["arm"])], ordered=True)
+    rows = rows.sort_values("arm").reset_index(drop=True)
+    rows["arm"] = rows["arm"].astype(str)
+    rows.insert(0, "run_id", Path(streams_folder).name)
+    rows["epsilon"] = float(summary["epsilon"])
+    rows["audit_rate"] = float(summary["audit_rate"])
+    return rows
+
+
+def case_study_figure_rows(windows: pd.DataFrame, certificate: pd.DataFrame) -> pd.DataFrame:
+    # the windows of the case study with the terms of the contract the figure draws as lines, read from the certificate
+    terms = certificate.set_index("item")["value"]
+    out = windows.copy()
+    for item in ("epsilon", "pi_max", "calibration_prevalence"):
+        out[item] = float(terms[item])
+    return out
 
 
 # the operating point of the example of proposal 2.2, a miss rate of 1% at 90% of the benign flows dismissed, beside a
