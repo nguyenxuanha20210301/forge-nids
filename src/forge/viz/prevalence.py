@@ -96,3 +96,47 @@ def for_by_prevalence_rows(rows: list[dict], methods: list[str], line, lines=BES
     labels = [line(m)["label"] for m in methods if line(m)["label"] in first.get_legend_handles_labels()[1]]
     layout.legend_below(fig, first, labels, [(delta_line, r"$\delta$"), *yardsticks])
     return fig
+
+
+def for_by_prevalence_compact(rows: list[dict], methods: list[str], line, lines=BEST_LINES) -> plt.Figure:
+    """the figure of for_by_prevalence_rows without its FOR panels, so that it takes half a page. the share of pairs
+    with FOR above epsilon sits above and the share of the window dismissed below, one column per entry of rows,
+    whose label names the column under its prevalence axis."""
+    fig, axes = plt.subplots(2, len(rows), figsize=(style.WIDTH_DOUBLE, 4.3), sharex="col", squeeze=False)
+    yardsticks = []
+    delta_line = None
+    for c, spec in enumerate(rows):
+        top, bottom = axes[0, c], axes[1, c]
+        data, summary = spec["data"], spec["summary"]
+        present = [m for m in methods if m in set(data["method"])]
+        for k, method in enumerate(present):
+            g = data[data["method"] == method].sort_values("prevalence")
+            x = layout.dodge(g["prevalence"], k, len(present), 0.035, log=True)
+            layout.points(top, x, g["violation_rate"], g["violation_window_min"], g["violation_window_max"],
+                          **line(method))
+            if "dismissed_low" in g and "dismissed_high" in g:
+                layout.points(bottom, x, g["dismissed_mean"], g["dismissed_low"], g["dismissed_high"],
+                              **line(method))
+            else:
+                bottom.plot(x, g["dismissed_mean"], markersize=3.5, linewidth=1.2, **line(method))
+        g = data[data["method"] == present[0]].sort_values("prevalence") if present else data.iloc[:0]
+        drawn = [(name, dash, label) for name, dash, label in lines
+                 if f"{name}_dismissed" in g and g[f"{name}_dismissed"].notna().any()]
+        if drawn:
+            yardsticks = [(bottom.plot(g["prevalence"], g[f"{name}_dismissed"], color=style.INK, linestyle=dash,
+                                       linewidth=1, label=label)[0], label) for name, dash, label in drawn]
+        delta_line = top.axhline(summary["delta"], color=style.GRAY, linestyle="--", linewidth=1)
+        top.set_ylim(-0.02, 1.02)
+        bottom.set_ylim(0, 1)
+        bottom.yaxis.set_major_formatter(style.percent)
+        prevalence_axis(top, summary, False)
+        prevalence_axis(bottom, summary, True)
+        bottom.set_xlabel(f"attack prevalence in the window\n{spec['label']}")
+    axes[0, 0].set_ylabel(r"share with FOR > $\varepsilon$")
+    axes[1, 0].set_ylabel("share of the window dismissed")
+    for ax, letter in zip(axes.flat, "abcdefghi"):
+        layout.panel_letter(ax, letter)
+    first = max(axes[0], key=lambda ax: len(ax.get_legend_handles_labels()[1]))
+    labels = [line(m)["label"] for m in methods if line(m)["label"] in first.get_legend_handles_labels()[1]]
+    layout.legend_below(fig, first, labels, [(delta_line, r"$\delta$"), *yardsticks])
+    return fig

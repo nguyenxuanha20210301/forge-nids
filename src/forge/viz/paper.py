@@ -75,6 +75,17 @@ def e1_for_by_prevalence(rows: list[dict]) -> plt.Figure:
     return prevalence.for_by_prevalence_rows(drawn, methods, _method_line, [*BEST_LINES, EVERY_LINE], floor)
 
 
+def e1_for_by_prevalence_compact(rows: list[dict]) -> plt.Figure:
+    """the E1 figure at half a page for the journal, the share of pairs with FOR above epsilon above and the share
+    of the window dismissed below, one column per dataset named by its short label, the FOR panels left to
+    e1_for_by_prevalence."""
+    style.use()
+    methods = [m for m in FIGURE_METHODS if any(m in set(r["data"]["method"]) for r in rows)]
+    drawn = [{"data": r["data"], "summary": r["summary"], "label": DATASET_SHORT.get(r.get("dataset", ""), r["label"]),
+              "window": "reference window", "unit": DATASET_UNITS.get(r.get("dataset", ""), "sessions")} for r in rows]
+    return prevalence.for_by_prevalence_compact(drawn, methods, _method_line, [*BEST_LINES, EVERY_LINE])
+
+
 def e5_dismissed_by_epsilon(table: pd.DataFrame, main_epsilon: dict) -> plt.Figure:
     """the certified share of the reference windows dismissed under every scorer by epsilon, one panel per dataset,
     S-best left out since it repeats a base scorer."""

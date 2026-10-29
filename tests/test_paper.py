@@ -65,6 +65,15 @@ def test_e1_table_and_rows_rename_the_pooled_forms(tmp_path):
     labels = fig.legends[0].get_texts()
     assert any("calibration mix" in t.get_text() for t in labels)
     assert all(p.stat().st_size > 0 for p in save_figure(fig, tmp_path, "e1"))
+    # the compact figure keeps the violation and dismissed panels of every dataset and drops the FOR panels
+    compact = figures.e1_for_by_prevalence_compact([
+        {"data": paper.e1_rows(table[table["dataset"] == "anoshift"]), "dataset": "anoshift", "summary": settings,
+         "label": "AnoShift"},
+        {"data": rows, "dataset": "litnet2020", "summary": settings, "label": "LITNET"}])
+    assert len(compact.axes) == 4
+    assert compact.axes[2].get_xlabel().endswith("AnoShift") and compact.axes[3].get_xlabel().endswith("LITNET-2020")
+    assert any("calibration mix" in t.get_text() for t in compact.legends[0].get_texts())
+    assert all(p.stat().st_size > 0 for p in save_figure(compact, tmp_path, "e1_compact"))
 
 
 def pooled_e5():

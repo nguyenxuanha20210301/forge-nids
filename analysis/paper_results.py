@@ -231,6 +231,7 @@ def draw(tables: dict, folder: Path) -> list[str]:
                          "label": figures.DATASET_LABELS[dataset]})
         if rows:
             drawn.append(("e1_for_by_prevalence", figures.e1_for_by_prevalence(rows)))
+            drawn.append(("e1_for_by_prevalence_compact", figures.e1_for_by_prevalence_compact(rows)))
     if "e5_by_epsilon" in read:
         main = {paper.DATASETS[n]: float(settings.loc[paper.EXPERIMENTS[n], "main_epsilon"])
                 for n in ("e31", "e32") if paper.EXPERIMENTS[n] in settings.index}
